@@ -1014,6 +1014,23 @@ func (h *Handler) AccountUsage(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, response)
 }
 
+func (h *Handler) selectedAccountFromRequest(r *http.Request, provider string) *config.MultiAccountConfig {
+	name := strings.TrimSpace(r.URL.Query().Get("account_name"))
+	accountProvider := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("account_provider")))
+	if name == "" || accountProvider == "" || !strings.EqualFold(accountProvider, provider) {
+		return nil
+	}
+
+	accounts := h.collectAccountConfigs()
+	for i := range accounts {
+		if strings.EqualFold(accounts[i].Provider, provider) && strings.EqualFold(accounts[i].Name, name) {
+			acct := accounts[i]
+			return &acct
+		}
+	}
+	return nil
+}
+
 // ActivateAccount writes the selected linked account credentials into provider auth files and restarts onWatch.
 func (h *Handler) ActivateAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1353,13 +1370,21 @@ func (h *Handler) currentBoth(w http.ResponseWriter, r *http.Request) {
 		response["zai"] = h.buildZaiCurrent()
 	}
 	if h.config.HasProvider("anthropic") {
-		response["anthropic"] = h.buildAnthropicCurrent()
+		if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+			response["anthropic"] = h.buildAnthropicCurrentForAccount(*acct)
+		} else {
+			response["anthropic"] = h.buildAnthropicCurrent()
+		}
 	}
 	if h.config.HasProvider("copilot") {
 		response["copilot"] = h.buildCopilotCurrent()
 	}
 	if h.config.HasProvider("codex") {
-		response["codex"] = h.buildCodexCurrent()
+		if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+			response["codex"] = h.buildCodexCurrentForAccount(*acct)
+		} else {
+			response["codex"] = h.buildCodexCurrent()
+		}
 	}
 	respondJSON(w, http.StatusOK, response)
 }
@@ -3213,6 +3238,10 @@ func (h *Handler) buildZaiInsights(hidden map[string]bool) insightsResponse {
 
 // currentAnthropic returns Anthropic quota status.
 func (h *Handler) currentAnthropic(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		respondJSON(w, http.StatusOK, h.buildAnthropicCurrentForAccount(*acct))
+		return
+	}
 	respondJSON(w, http.StatusOK, h.buildAnthropicCurrent())
 }
 
@@ -3259,6 +3288,50 @@ func (h *Handler) buildAnthropicCurrent() map[string]interface{} {
 				qMap["currentRate"] = summary.CurrentRate
 				qMap["projectedUtil"] = summary.ProjectedUtil
 			}
+		}
+		quotas = append(quotas, qMap)
+	}
+	response["quotas"] = quotas
+	return response
+}
+
+func (h *Handler) buildAnthropicCurrentForAccount(acct config.MultiAccountConfig) map[string]interface{} {
+	now := time.Now().UTC()
+	response := map[string]interface{}{
+		"capturedAt": now.Format(time.RFC3339),
+		"quotas":     []interface{}{},
+		"account":    acct.Name,
+	}
+
+	token, _, _ := resolveMultiAccountToken(acct, h.logger)
+	if token == "" {
+		response["error"] = "missing token"
+		return response
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client := api.NewAnthropicClient(token, h.logger)
+	usage, err := client.FetchQuotas(ctx)
+	if err != nil {
+		response["error"] = sanitizeAccountUsageError(err)
+		return response
+	}
+
+	snap := usage.ToSnapshot(now)
+	quotas := make([]map[string]interface{}, 0, len(snap.Quotas))
+	for _, q := range snap.Quotas {
+		qMap := map[string]interface{}{
+			"name":        q.Name,
+			"displayName": api.AnthropicDisplayName(q.Name),
+			"utilization": q.Utilization,
+			"status":      anthropicUtilStatus(q.Utilization),
+		}
+		if q.ResetsAt != nil {
+			timeUntilReset := time.Until(*q.ResetsAt)
+			qMap["resetsAt"] = q.ResetsAt.Format(time.RFC3339)
+			qMap["timeUntilReset"] = formatDuration(timeUntilReset)
+			qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
 		}
 		quotas = append(quotas, qMap)
 	}
@@ -5354,6 +5427,10 @@ func codexInsightSeverity(util float64) string {
 // ── Codex Handlers ──
 
 func (h *Handler) currentCodex(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		respondJSON(w, http.StatusOK, h.buildCodexCurrentForAccount(*acct))
+		return
+	}
 	respondJSON(w, http.StatusOK, h.buildCodexCurrent())
 }
 
@@ -5430,6 +5507,75 @@ func (h *Handler) buildCodexCurrent() map[string]interface{} {
 				qMap["currentRate"] = summary.CurrentRate
 				qMap["projectedUtil"] = summary.ProjectedUtil
 			}
+		}
+		quotas = append(quotas, qMap)
+	}
+	response["quotas"] = quotas
+	return response
+}
+
+func (h *Handler) buildCodexCurrentForAccount(acct config.MultiAccountConfig) map[string]interface{} {
+	now := time.Now().UTC()
+	response := map[string]interface{}{
+		"capturedAt": now.Format(time.RFC3339),
+		"quotas":     []interface{}{},
+		"account":    acct.Name,
+	}
+
+	token, accountID, _ := resolveMultiAccountToken(acct, h.logger)
+	if token == "" {
+		response["error"] = "missing token"
+		return response
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client := api.NewCodexClient(token, h.logger)
+	if accountID != "" {
+		client.SetAccountID(accountID)
+	}
+	usage, err := client.FetchUsage(ctx)
+	if err != nil {
+		response["error"] = sanitizeAccountUsageError(err)
+		return response
+	}
+	snap := usage.ToSnapshot(now)
+	if snap.PlanType != "" {
+		response["planType"] = snap.PlanType
+	}
+	if snap.CreditsBalance != nil {
+		response["creditsBalance"] = *snap.CreditsBalance
+	}
+
+	quotas := make([]map[string]interface{}, 0, len(snap.Quotas))
+	for _, q := range snap.Quotas {
+		headroom := 100 - q.Utilization
+		if headroom < 0 {
+			headroom = 0
+		}
+		status := codexUtilStatus(q.Utilization)
+		qMap := map[string]interface{}{
+			"name":        q.Name,
+			"displayName": api.CodexDisplayName(q.Name),
+			"utilization": q.Utilization,
+			"headroom":    headroom,
+			"status":      status,
+		}
+		if q.Name == "code_review" {
+			remaining := 100 - q.Utilization
+			if remaining < 0 {
+				remaining = 0
+			}
+			qMap["cardPercent"] = remaining
+			qMap["cardLabel"] = "Remaining"
+			qMap["remainingPercent"] = remaining
+			qMap["status"] = codexRemainingStatus(remaining)
+		}
+		if q.ResetsAt != nil {
+			timeUntilReset := time.Until(*q.ResetsAt)
+			qMap["resetsAt"] = q.ResetsAt.Format(time.RFC3339)
+			qMap["timeUntilReset"] = formatDuration(timeUntilReset)
+			qMap["timeUntilResetSeconds"] = int64(timeUntilReset.Seconds())
 		}
 		quotas = append(quotas, qMap)
 	}

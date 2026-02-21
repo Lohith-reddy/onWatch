@@ -61,6 +61,14 @@ function providerParam() {
   return `provider=${getCurrentProvider()}`;
 }
 
+function getSelectedAccountRef() {
+  const key = State.accountsSelectedKey || '';
+  if (!key || !key.includes('::')) return null;
+  const parts = key.split('::');
+  if (parts.length < 2) return null;
+  return { provider: parts[0], name: parts.slice(1).join('::') };
+}
+
 // ── Global State ──
 const State = {
   chart: null,
@@ -1569,7 +1577,13 @@ function startCountdowns() {
 
 async function fetchCurrent() {
   try {
-    const res = await authFetch(`${API_BASE}/api/current?${providerParam()}`);
+    let url = `${API_BASE}/api/current?${providerParam()}`;
+    const selected = getSelectedAccountRef();
+    const provider = getCurrentProvider();
+    if (selected && (provider === 'both' || provider === selected.provider)) {
+      url += `&account_provider=${encodeURIComponent(selected.provider)}&account_name=${encodeURIComponent(selected.name)}`;
+    }
+    const res = await authFetch(url);
     if (!res.ok) throw new Error('Failed to fetch');
     const data = await res.json();
 
@@ -1771,6 +1785,7 @@ function setupAccountSelector() {
   select.addEventListener('change', () => {
     State.accountsSelectedKey = select.value || '';
     fetchAccountUsage();
+    fetchCurrent();
   });
 }
 
