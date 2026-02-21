@@ -2514,6 +2514,11 @@ select.settings-input {
   background: var(--surface-card);
 }
 
+.linked-accounts-table code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
 /* Save bar */
 .settings-save-bar {
   display: flex;

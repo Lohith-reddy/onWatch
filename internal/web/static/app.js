@@ -1719,7 +1719,16 @@ async function fetchAccountUsage() {
     if (!res.ok) throw new Error('Failed to fetch account usage');
 
     const data = await res.json();
-    const accounts = (data && Array.isArray(data.accounts)) ? data.accounts : [];
+    const allAccounts = (data && Array.isArray(data.accounts)) ? data.accounts : [];
+    const currentProvider = getCurrentProvider();
+    const accounts = allAccounts.filter(a => {
+      if (!a || !a.provider) return false;
+      if (currentProvider === 'both') return true;
+      if (currentProvider === 'codex' || currentProvider === 'anthropic') {
+        return a.provider === currentProvider;
+      }
+      return false;
+    });
     State.accountsLatestData = accounts;
     if (accounts.length === 0) {
       toggleAccountsSection(false);
@@ -4561,23 +4570,40 @@ function renderLinkedAccounts(accounts) {
     return al.localeCompare(bl);
   });
 
-  list.innerHTML = sorted.map(acct => {
-    const provider = acct.provider || '';
-    const name = acct.name || '';
-    const accountID = acct.account_id || '';
-    return `
-      <div class="linked-account-item">
-        <div class="linked-account-meta">
-          <div class="linked-account-title">${escapeHTML(name)} <span class="badge">${escapeHTML(provider)}</span></div>
-          <div class="linked-account-sub">${accountID ? `Account ID: ${escapeHTML(accountID)}` : 'Account ID: not detected yet'}</div>
-        </div>
-        <div class="linked-account-actions">
-          <button class="settings-test-btn settings-test-btn-sm linked-account-reauth" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Re-authenticate</button>
-          <button class="settings-test-btn settings-test-btn-sm linked-account-delete" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Delete</button>
-        </div>
-      </div>
-    `;
-  }).join('');
+  list.innerHTML = `
+    <div class="table-wrapper">
+      <table class="data-table linked-accounts-table">
+        <thead>
+          <tr>
+            <th>Account Name</th>
+            <th>Provider</th>
+            <th>Account ID</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted.map(acct => {
+            const provider = acct.provider || '';
+            const name = acct.name || '';
+            const accountID = acct.account_id || '';
+            return `
+              <tr>
+                <td>${escapeHTML(name)}</td>
+                <td><span class="badge">${escapeHTML(provider)}</span></td>
+                <td>${accountID ? `<code>${escapeHTML(accountID)}</code>` : 'Not detected yet'}</td>
+                <td>
+                  <div class="linked-account-actions">
+                    <button class="settings-test-btn settings-test-btn-sm linked-account-reauth" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Re-authenticate</button>
+                    <button class="settings-test-btn settings-test-btn-sm linked-account-delete" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Delete</button>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
 
   list.querySelectorAll('.linked-account-delete').forEach(btn => {
     btn.addEventListener('click', async () => {
