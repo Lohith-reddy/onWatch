@@ -4232,6 +4232,9 @@ function setupSMTPTest() {
 }
 
 function setupOAuthLogin() {
+  if (typeof State.oauthPollTimer === 'undefined') State.oauthPollTimer = null;
+  if (typeof State.oauthActiveSessionId === 'undefined') State.oauthActiveSessionId = '';
+
   const startBtn = document.getElementById('oauth-start-btn');
   const result = document.getElementById('oauth-result');
   const details = document.getElementById('oauth-details');
@@ -4270,6 +4273,12 @@ function setupOAuthLogin() {
         result.className = 'settings-test-result success';
       }
 
+      // Keep only the most recent OAuth flow active in UI.
+      if (State.oauthPollTimer) {
+        clearInterval(State.oauthPollTimer);
+        State.oauthPollTimer = null;
+      }
+      State.oauthActiveSessionId = data.session_id || '';
       renderOAuthDetails(data);
       if (data.session_id) pollOAuthStatus(data.session_id);
     } catch (e) {
@@ -4303,25 +4312,46 @@ function renderOAuthDetails(data) {
 }
 
 function pollOAuthStatus(sessionId) {
+  // Mark this as the currently displayed session.
+  State.oauthActiveSessionId = sessionId;
+
   let attempts = 0;
   const maxAttempts = 120; // ~10 minutes
   const timer = setInterval(async () => {
+    // If user started a newer flow, stop this older poller.
+    if (State.oauthActiveSessionId !== sessionId) {
+      clearInterval(timer);
+      if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
+      return;
+    }
+
     attempts += 1;
     try {
       const resp = await authFetch(`/api/oauth/status?id=${encodeURIComponent(sessionId)}`);
       const data = await resp.json();
       if (resp.ok) {
+        // Ignore stale responses from older sessions.
+        if (State.oauthActiveSessionId !== sessionId) {
+          clearInterval(timer);
+          if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
+          return;
+        }
         renderOAuthDetails(data);
         if (data.done || attempts >= maxAttempts) {
           clearInterval(timer);
+          if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
         }
       } else {
         clearInterval(timer);
+        if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
       }
     } catch (e) {
       clearInterval(timer);
+      if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
     }
   }, 5000);
+
+  State.oauthPollTimer = timer;
 }
 
 function setupPushNotifications() {
