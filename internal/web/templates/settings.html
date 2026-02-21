@@ -199,6 +199,37 @@
                     <!-- Populated dynamically by JS -->
                 </div>
             </div>
+            <div class="settings-divider"></div>
+            <div class="settings-section">
+                <h3 class="settings-section-title">OAuth Account Login</h3>
+                <p class="settings-section-desc">Start provider login in your browser. onWatch shows the raw URL/code so you can open it in any browser profile.</p>
+                <div class="settings-fields">
+                    <div class="settings-field settings-field-half">
+                        <label for="oauth-provider">Provider</label>
+                        <select id="oauth-provider" class="settings-input">
+                            <option value="codex">Codex</option>
+                            <option value="anthropic">Claude</option>
+                        </select>
+                    </div>
+                    <div class="settings-field settings-field-half">
+                        <label for="oauth-email">Email (optional for Claude)</label>
+                        <input type="text" id="oauth-email" class="settings-input" placeholder="name@company.com">
+                    </div>
+                    <div class="settings-field">
+                        <label class="settings-checkbox-row">
+                            <input type="checkbox" id="oauth-open-browser" checked>
+                            <span>Open default browser automatically</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="settings-test-btn" id="oauth-start-btn" type="button">
+                        Start OAuth Login
+                    </button>
+                    <span class="settings-test-result" id="oauth-result"></span>
+                </div>
+                <div id="oauth-details" class="settings-feedback" hidden></div>
+            </div>
         </div>
 
         <!-- General Panel -->

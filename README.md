@@ -92,6 +92,20 @@ onwatch status       # check if running
 
 Open **http://localhost:9211** and log in with your `.env` credentials.
 
+### macOS quick launch (double-click)
+
+```bash
+# one-time: make launchers executable
+chmod +x ./launch_onwatch.sh "./OnWatch Launcher.command" ./scripts/create_onwatch_app.sh
+
+# optional: generate a double-clickable .app icon launcher
+./scripts/create_onwatch_app.sh
+```
+
+Then launch by double-clicking either:
+- `OnWatch Launcher.command`
+- `OnWatch Launcher.app` (generated)
+
 ---
 
 ## What onWatch Tracks (That Your Provider Doesn't)

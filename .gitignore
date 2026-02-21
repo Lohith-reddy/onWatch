@@ -79,3 +79,6 @@ __pycache__/
 
 # Mock server binary
 /mockserver
+
+# Generated local launcher app bundle
+OnWatch Launcher.app/

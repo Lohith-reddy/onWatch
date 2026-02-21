@@ -185,6 +185,22 @@ func (s *Store) createTables() error {
 			updated_at TEXT NOT NULL
 		);
 
+		CREATE TABLE IF NOT EXISTS linked_accounts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider TEXT NOT NULL,
+			name TEXT NOT NULL,
+			account_id TEXT DEFAULT '',
+			access_token_enc TEXT NOT NULL,
+			refresh_token_enc TEXT DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			last_error TEXT DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(provider, name)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_linked_accounts_provider ON linked_accounts(provider);
+
 		-- Z.ai-specific tables
 		CREATE TABLE IF NOT EXISTS zai_snapshots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

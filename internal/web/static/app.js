@@ -3911,6 +3911,7 @@ function initSettingsPage() {
   loadSettings();
   setupSettingsSave();
   setupSMTPTest();
+  setupOAuthLogin();
   setupPushNotifications();
   setupSettingsPassword();
   setupThresholdSliders();
@@ -4228,6 +4229,99 @@ function setupSMTPTest() {
       testBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg> Send Test Email';
     }
   });
+}
+
+function setupOAuthLogin() {
+  const startBtn = document.getElementById('oauth-start-btn');
+  const result = document.getElementById('oauth-result');
+  const details = document.getElementById('oauth-details');
+  if (!startBtn) return;
+
+  startBtn.addEventListener('click', async () => {
+    const provider = document.getElementById('oauth-provider')?.value || 'codex';
+    const email = document.getElementById('oauth-email')?.value?.trim() || '';
+    const openBrowser = document.getElementById('oauth-open-browser')?.checked !== false;
+
+    startBtn.disabled = true;
+    startBtn.textContent = 'Starting...';
+    if (result) {
+      result.textContent = '';
+      result.className = 'settings-test-result';
+    }
+    if (details) details.hidden = true;
+
+    try {
+      const resp = await authFetch('/api/oauth/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, email, open_browser: openBrowser })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        if (result) {
+          result.textContent = data.error || 'Failed to start OAuth';
+          result.className = 'settings-test-result error';
+        }
+        return;
+      }
+
+      if (result) {
+        result.textContent = 'OAuth started. Complete sign-in in browser.';
+        result.className = 'settings-test-result success';
+      }
+
+      renderOAuthDetails(data);
+      if (data.session_id) pollOAuthStatus(data.session_id);
+    } catch (e) {
+      if (result) {
+        result.textContent = 'Network error starting OAuth.';
+        result.className = 'settings-test-result error';
+      }
+    } finally {
+      startBtn.disabled = false;
+      startBtn.textContent = 'Start OAuth Login';
+    }
+  });
+}
+
+function renderOAuthDetails(data) {
+  const details = document.getElementById('oauth-details');
+  if (!details) return;
+  const url = data.url || '';
+  const code = data.code || '';
+  const output = data.output || '';
+
+  details.hidden = false;
+  details.className = 'settings-feedback success';
+  details.innerHTML = `
+    <div><strong>Provider:</strong> ${escapeHTML(data.provider || '-')}</div>
+    <div><strong>OAuth URL:</strong> ${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${escapeHTML(url)}</a>` : 'Waiting...'}</div>
+    <div><strong>Code:</strong> ${code ? `<code>${escapeHTML(code)}</code>` : 'N/A'}</div>
+    <div><strong>Status:</strong> ${data.done ? (data.error ? 'Failed' : 'Completed') : 'In progress'}</div>
+    ${output ? `<pre style="white-space:pre-wrap; margin-top:8px; max-height:180px; overflow:auto;">${escapeHTML(output)}</pre>` : ''}
+  `;
+}
+
+function pollOAuthStatus(sessionId) {
+  let attempts = 0;
+  const maxAttempts = 120; // ~10 minutes
+  const timer = setInterval(async () => {
+    attempts += 1;
+    try {
+      const resp = await authFetch(`/api/oauth/status?id=${encodeURIComponent(sessionId)}`);
+      const data = await resp.json();
+      if (resp.ok) {
+        renderOAuthDetails(data);
+        if (data.done || attempts >= maxAttempts) {
+          clearInterval(timer);
+        }
+      } else {
+        clearInterval(timer);
+      }
+    } catch (e) {
+      clearInterval(timer);
+    }
+  }, 5000);
 }
 
 function setupPushNotifications() {
