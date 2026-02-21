@@ -110,3 +110,39 @@ func DetectAnthropicCredentialsFromFile(path string, logger *slog.Logger) *Anthr
 	}
 	return creds
 }
+
+// WriteAnthropicAccessToken updates local Claude credentials with a new access token.
+// If refresh token or expiry is missing, existing detected values are reused when available.
+func WriteAnthropicAccessToken(accessToken, refreshToken string, expiresAt *time.Time, logger *slog.Logger) error {
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	if accessToken == "" {
+		return nil
+	}
+
+	if refreshToken == "" || expiresAt == nil {
+		if existing := DetectAnthropicCredentials(logger); existing != nil {
+			if refreshToken == "" {
+				refreshToken = strings.TrimSpace(existing.RefreshToken)
+			}
+			if expiresAt == nil && !existing.ExpiresAt.IsZero() {
+				t := existing.ExpiresAt
+				expiresAt = &t
+			}
+		}
+	}
+
+	if refreshToken == "" {
+		// Keep valid shape even if refresh token is unavailable.
+		refreshToken = accessToken
+	}
+
+	expiry := 3600
+	if expiresAt != nil {
+		delta := int(time.Until(*expiresAt).Seconds())
+		if delta > 0 {
+			expiry = delta
+		}
+	}
+	return WriteAnthropicCredentials(accessToken, refreshToken, expiry)
+}

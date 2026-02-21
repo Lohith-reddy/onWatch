@@ -104,6 +104,7 @@ const State = {
   overviewSort: { key: null, dir: 'desc' },
   overviewPage: 1,
   overviewPageSize: 10,
+  accountsFilterName: '',
 };
 
 // ── Persistence ──
@@ -1682,6 +1683,7 @@ function toggleAccountsSection(show) {
 
 async function fetchAccountUsage() {
   const body = document.getElementById('accounts-usage-body');
+  const filterSelect = document.getElementById('accounts-name-filter');
   if (!body) return;
 
   if (!shouldShowAccountsSection()) {
@@ -1700,8 +1702,24 @@ async function fetchAccountUsage() {
       return;
     }
 
+    if (filterSelect) {
+      const names = [...new Set(accounts.map(a => a.name).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      const current = filterSelect.value || '';
+      filterSelect.innerHTML = '<option value="">All Accounts</option>' +
+        names.map(n => `<option value="${escapeHTML(n)}">${escapeHTML(n)}</option>`).join('');
+      if (current && names.includes(current)) {
+        filterSelect.value = current;
+      } else {
+        filterSelect.value = '';
+      }
+      State.accountsFilterName = filterSelect.value || '';
+    }
+
+    const selectedName = State.accountsFilterName || '';
+    const visibleAccounts = selectedName ? accounts.filter(a => (a.name || '').toLowerCase() === selectedName.toLowerCase()) : accounts;
+
     toggleAccountsSection(true);
-    body.innerHTML = accounts.map(acct => {
+    body.innerHTML = visibleAccounts.map(acct => {
       const ok = acct.status === 'ok';
       const util = (typeof acct.weeklyUtilization === 'number') ? `${acct.weeklyUtilization.toFixed(1)}%` : '--';
       return `
@@ -1712,13 +1730,64 @@ async function fetchAccountUsage() {
           <td>${acct.weeklyLimitEndsAt ? formatDateTime(acct.weeklyLimitEndsAt) : '--'}</td>
           <td>${acct.renewalAt ? formatDateTime(acct.renewalAt) : '--'}</td>
           <td><span class="status-badge" data-status="${ok ? 'healthy' : 'danger'}">${ok ? 'Healthy' : `Error: ${escapeHTML(acct.error || 'request failed')}`}</span></td>
+          <td>${ok ? `<button class="settings-test-btn settings-test-btn-sm account-use-btn" data-provider="${escapeHTML(acct.provider || '')}" data-name="${escapeHTML(acct.name || '')}" type="button">Use Account</button>` : ''}</td>
         </tr>
       `;
     }).join('');
+    if (visibleAccounts.length === 0) {
+      body.innerHTML = '<tr><td colspan="7" class="empty-state">No accounts match this filter.</td></tr>';
+    } else {
+      bindAccountUseButtons();
+    }
   } catch (err) {
     toggleAccountsSection(true);
-    body.innerHTML = '<tr><td colspan="6" class="empty-state">Unable to load multi-account usage.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty-state">Unable to load multi-account usage.</td></tr>';
   }
+}
+
+function bindAccountUseButtons() {
+  document.querySelectorAll('.account-use-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider || '';
+      const name = btn.dataset.name || '';
+      if (!provider || !name) return;
+      if (!confirm(`Switch ${provider} auth to account "${name}" and restart onWatch now?`)) return;
+
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = 'Switching...';
+      try {
+        const resp = await authFetch('/api/accounts/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, name })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'Failed to switch account');
+          btn.disabled = false;
+          btn.textContent = prev;
+          return;
+        }
+        btn.textContent = 'Restarting...';
+        // Same restart detection approach used by update flow.
+        setTimeout(() => pollForRestart(), 1000);
+      } catch (e) {
+        alert('Network error while switching account');
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
+    });
+  });
+}
+
+function setupAccountFilter() {
+  const select = document.getElementById('accounts-name-filter');
+  if (!select) return;
+  select.addEventListener('change', () => {
+    State.accountsFilterName = select.value || '';
+    fetchAccountUsage();
+  });
 }
 
 
@@ -4242,8 +4311,17 @@ function setupOAuthLogin() {
 
   startBtn.addEventListener('click', async () => {
     const provider = document.getElementById('oauth-provider')?.value || 'codex';
+    const name = document.getElementById('oauth-account-name')?.value?.trim() || '';
     const email = document.getElementById('oauth-email')?.value?.trim() || '';
     const openBrowser = document.getElementById('oauth-open-browser')?.checked !== false;
+
+    if (!name) {
+      if (result) {
+        result.textContent = 'Account name is required.';
+        result.className = 'settings-test-result error';
+      }
+      return;
+    }
 
     startBtn.disabled = true;
     startBtn.textContent = 'Starting...';
@@ -4257,7 +4335,7 @@ function setupOAuthLogin() {
       const resp = await authFetch('/api/oauth/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, email, open_browser: openBrowser })
+        body: JSON.stringify({ provider, name, email, open_browser: openBrowser })
       });
       const data = await resp.json();
       if (!resp.ok) {
@@ -4299,15 +4377,20 @@ function renderOAuthDetails(data) {
   const url = data.url || '';
   const code = data.code || '';
   const output = data.output || '';
+  const accountName = data.name || '-';
+  const statusText = data.done ? (data.error ? 'Failed' : 'Completed') : 'In progress';
 
   details.hidden = false;
-  details.className = 'settings-feedback success';
+  details.className = 'settings-feedback ' + (data.error ? 'error' : 'success');
   details.innerHTML = `
+    <div><strong>Account:</strong> ${escapeHTML(accountName)}</div>
     <div><strong>Provider:</strong> ${escapeHTML(data.provider || '-')}</div>
-    <div><strong>OAuth URL:</strong> ${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${escapeHTML(url)}</a>` : 'Waiting...'}</div>
-    <div><strong>Code:</strong> ${code ? `<code>${escapeHTML(code)}</code>` : 'N/A'}</div>
-    <div><strong>Status:</strong> ${data.done ? (data.error ? 'Failed' : 'Completed') : 'In progress'}</div>
-    ${output ? `<pre style="white-space:pre-wrap; margin-top:8px; max-height:180px; overflow:auto;">${escapeHTML(output)}</pre>` : ''}
+    <div><strong>Status:</strong> ${escapeHTML(statusText)}${data.saved ? ' (saved)' : ''}</div>
+    <div style="margin-top:8px;"><strong>OAuth URL</strong></div>
+    <div class="oauth-mono-box">${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${escapeHTML(url)}</a>` : 'Waiting...'}</div>
+    <div style="margin-top:8px;"><strong>Code</strong></div>
+    <div class="oauth-mono-box">${code ? `<code>${escapeHTML(code)}</code>` : 'N/A'}</div>
+    ${output ? `<div style="margin-top:8px;"><strong>Session Output</strong></div><pre class="oauth-output-box">${escapeHTML(output)}</pre>` : ''}
   `;
 }
 
@@ -4723,6 +4806,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPasswordToggle();
   setupTableControls();
   setupOverviewControls();
+  setupAccountFilter();
   setupHeaderActions();
   setupCardModals();
 

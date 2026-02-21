@@ -87,13 +87,30 @@ type Handler struct {
 type oauthSession struct {
 	ID        string
 	Provider  string
+	Name      string
 	URL       string
 	Code      string
 	Output    string
 	StartedAt time.Time
 	Done      bool
+	Saved     bool
 	Err       string
 }
+
+type linkedAccount struct {
+	Provider        string `json:"provider"`
+	Name            string `json:"name"`
+	AccountID       string `json:"account_id,omitempty"`
+	AccessTokenEnc  string `json:"access_token_enc"`
+	RefreshTokenEnc string `json:"refresh_token_enc,omitempty"`
+	IDTokenEnc      string `json:"id_token_enc,omitempty"`
+	APIKeyEnc       string `json:"api_key_enc,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+const linkedAccountsSettingKey = "linked_accounts"
 
 // NewHandler creates a new Handler instance
 func NewHandler(store *store.Store, tracker *tracker.Tracker, logger *slog.Logger, sessions *SessionStore, cfg *config.Config, zaiTracker ...*tracker.ZaiTracker) *Handler {
@@ -517,6 +534,7 @@ func (h *Handler) OAuthStart(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Provider    string `json:"provider"`
+		Name        string `json:"name"`
 		Email       string `json:"email"`
 		OpenBrowser bool   `json:"open_browser"`
 	}
@@ -529,10 +547,16 @@ func (h *Handler) OAuthStart(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "provider must be codex or anthropic")
 		return
 	}
+	accountName := strings.TrimSpace(body.Name)
+	if accountName == "" {
+		respondError(w, http.StatusBadRequest, "account name is required")
+		return
+	}
 
 	sess := &oauthSession{
 		ID:        fmt.Sprintf("oauth-%d", time.Now().UnixNano()),
 		Provider:  provider,
+		Name:      accountName,
 		StartedAt: time.Now().UTC(),
 	}
 	h.oauthMu.Lock()
@@ -560,9 +584,11 @@ func (h *Handler) OAuthStart(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"session_id": current.ID,
 		"provider":   current.Provider,
+		"name":       current.Name,
 		"url":        current.URL,
 		"code":       current.Code,
 		"done":       current.Done,
+		"saved":      current.Saved,
 		"error":      current.Err,
 		"output":     current.Output,
 	}
@@ -594,9 +620,11 @@ func (h *Handler) OAuthStatus(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": current.ID,
 		"provider":   current.Provider,
+		"name":       current.Name,
 		"url":        current.URL,
 		"code":       current.Code,
 		"done":       current.Done,
+		"saved":      current.Saved,
 		"error":      current.Err,
 		"output":     current.Output,
 	})
@@ -641,6 +669,9 @@ func (h *Handler) runOAuthSession(sess *oauthSession, email string, openBrowser 
 	}
 
 	waitErr := cmd.Wait()
+	if waitErr == nil {
+		h.captureAndSaveOAuthAccount(sess.ID)
+	}
 	h.oauthMu.Lock()
 	defer h.oauthMu.Unlock()
 	s, ok := h.oauthSessions[sess.ID]
@@ -733,29 +764,335 @@ var runtimeGOOS = func() string {
 	return runtime.GOOS
 }
 
-// AccountUsage returns live weekly usage for configured multi-accounts.
+func (h *Handler) encryptionKeyForAccounts() string {
+	if h.sessions != nil && h.sessions.passwordHash != "" {
+		return DeriveEncryptionKey(h.sessions.passwordHash, nil)
+	}
+	if h.config != nil && h.config.AdminPassHash != "" {
+		return DeriveEncryptionKey(h.config.AdminPassHash, nil)
+	}
+	return ""
+}
+
+func (h *Handler) listLinkedAccounts() ([]linkedAccount, error) {
+	if h.store == nil {
+		return nil, nil
+	}
+	raw, err := h.store.GetSetting(linkedAccountsSettingKey)
+	if err != nil || raw == "" {
+		return nil, nil
+	}
+	var accounts []linkedAccount
+	if err := json.Unmarshal([]byte(raw), &accounts); err != nil {
+		return nil, err
+	}
+	return accounts, nil
+}
+
+func (h *Handler) saveLinkedAccounts(accounts []linkedAccount) error {
+	if h.store == nil {
+		return fmt.Errorf("store unavailable")
+	}
+	raw, err := json.Marshal(accounts)
+	if err != nil {
+		return err
+	}
+	return h.store.SetSetting(linkedAccountsSettingKey, string(raw))
+}
+
+func (h *Handler) upsertLinkedAccount(acct linkedAccount) error {
+	accounts, err := h.listLinkedAccounts()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if acct.CreatedAt == "" {
+		acct.CreatedAt = now
+	}
+	acct.UpdatedAt = now
+
+	replaced := false
+	for i := range accounts {
+		if strings.EqualFold(accounts[i].Provider, acct.Provider) && strings.EqualFold(accounts[i].Name, acct.Name) {
+			acct.CreatedAt = accounts[i].CreatedAt
+			accounts[i] = acct
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		accounts = append(accounts, acct)
+	}
+	return h.saveLinkedAccounts(accounts)
+}
+
+func (h *Handler) decryptLinkedAccountToken(acct linkedAccount) (string, error) {
+	key := h.encryptionKeyForAccounts()
+	if key == "" {
+		return "", fmt.Errorf("encryption key unavailable")
+	}
+	return notify.Decrypt(acct.AccessTokenEnc, key)
+}
+
+func decryptOptional(valueEnc, key string) string {
+	valueEnc = strings.TrimSpace(valueEnc)
+	if valueEnc == "" || key == "" {
+		return ""
+	}
+	plain, err := notify.Decrypt(valueEnc, key)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(plain)
+}
+
+func encryptOptional(value, key string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || key == "" {
+		return ""
+	}
+	enc, err := notify.Encrypt(value, key)
+	if err != nil {
+		return ""
+	}
+	return enc
+}
+
+func (h *Handler) captureAndSaveOAuthAccount(sessionID string) {
+	h.oauthMu.RLock()
+	sess, ok := h.oauthSessions[sessionID]
+	if !ok {
+		h.oauthMu.RUnlock()
+		return
+	}
+	snapshot := *sess
+	h.oauthMu.RUnlock()
+
+	key := h.encryptionKeyForAccounts()
+	if key == "" {
+		h.markOAuthError(sessionID, "encryption key unavailable")
+		return
+	}
+
+	var token, refreshToken, idToken, apiKey, accountID string
+	var expiresAt *time.Time
+	switch snapshot.Provider {
+	case "codex":
+		creds := api.DetectCodexCredentials(h.logger)
+		if creds != nil {
+			token = strings.TrimSpace(creds.AccessToken)
+			if token == "" {
+				token = strings.TrimSpace(creds.APIKey)
+			}
+			refreshToken = strings.TrimSpace(creds.RefreshToken)
+			idToken = strings.TrimSpace(creds.IDToken)
+			apiKey = strings.TrimSpace(creds.APIKey)
+			accountID = strings.TrimSpace(creds.AccountID)
+		}
+	case "anthropic":
+		creds := api.DetectAnthropicCredentials(h.logger)
+		if creds != nil {
+			token = strings.TrimSpace(creds.AccessToken)
+			refreshToken = strings.TrimSpace(creds.RefreshToken)
+			if !creds.ExpiresAt.IsZero() {
+				t := creds.ExpiresAt
+				expiresAt = &t
+			}
+		}
+		if token == "" {
+			token = strings.TrimSpace(api.DetectAnthropicToken(h.logger))
+		}
+	}
+
+	if token == "" {
+		h.markOAuthError(sessionID, "login finished but no token was detected")
+		return
+	}
+
+	enc, err := notify.Encrypt(token, key)
+	if err != nil {
+		h.markOAuthError(sessionID, "failed to encrypt account token")
+		return
+	}
+
+	acct := linkedAccount{
+		Provider:        snapshot.Provider,
+		Name:            snapshot.Name,
+		AccountID:       accountID,
+		AccessTokenEnc:  enc,
+		RefreshTokenEnc: encryptOptional(refreshToken, key),
+		IDTokenEnc:      encryptOptional(idToken, key),
+		APIKeyEnc:       encryptOptional(apiKey, key),
+	}
+	if expiresAt != nil {
+		acct.ExpiresAt = expiresAt.UTC().Format(time.RFC3339)
+	}
+
+	if err := h.upsertLinkedAccount(acct); err != nil {
+		h.markOAuthError(sessionID, "failed to save linked account")
+		return
+	}
+
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	if s, ok := h.oauthSessions[sessionID]; ok {
+		s.Saved = true
+		s.Output += "\nSaved account: " + s.Name + "\n"
+	}
+}
+
+// AccountUsage returns live weekly usage for configured accounts.
 func (h *Handler) AccountUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
+	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	now := time.Now().UTC()
 	response := map[string]interface{}{
 		"capturedAt": now.Format(time.RFC3339),
 		"accounts":   []map[string]interface{}{},
 	}
-	if h.config == nil || len(h.config.MultiAccounts) == 0 {
-		respondJSON(w, http.StatusOK, response)
-		return
+
+	accounts := h.collectAccountConfigs()
+	if filterName != "" {
+		filtered := make([]config.MultiAccountConfig, 0, len(accounts))
+		for _, acct := range accounts {
+			if strings.EqualFold(acct.Name, filterName) {
+				filtered = append(filtered, acct)
+			}
+		}
+		accounts = filtered
 	}
 
-	results := make([]map[string]interface{}, 0, len(h.config.MultiAccounts))
-	for _, acct := range h.config.MultiAccounts {
+	results := make([]map[string]interface{}, 0, len(accounts))
+	for _, acct := range accounts {
 		results = append(results, h.fetchWeeklyAccountUsage(acct, now))
 	}
 	response["accounts"] = results
 	respondJSON(w, http.StatusOK, response)
+}
+
+// ActivateAccount writes the selected linked account credentials into provider auth files and restarts onWatch.
+func (h *Handler) ActivateAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Provider string `json:"provider"`
+		Name     string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(body.Provider))
+	name := strings.TrimSpace(body.Name)
+	if provider == "" || name == "" {
+		respondError(w, http.StatusBadRequest, "provider and name are required")
+		return
+	}
+
+	linked, err := h.listLinkedAccounts()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load linked accounts")
+		return
+	}
+
+	var selected *linkedAccount
+	for i := range linked {
+		if strings.EqualFold(linked[i].Provider, provider) && strings.EqualFold(linked[i].Name, name) {
+			selected = &linked[i]
+			break
+		}
+	}
+	if selected == nil {
+		respondError(w, http.StatusNotFound, "linked account not found")
+		return
+	}
+
+	key := h.encryptionKeyForAccounts()
+	if key == "" {
+		respondError(w, http.StatusServiceUnavailable, "encryption key unavailable")
+		return
+	}
+	access := decryptOptional(selected.AccessTokenEnc, key)
+	refresh := decryptOptional(selected.RefreshTokenEnc, key)
+	idToken := decryptOptional(selected.IDTokenEnc, key)
+	apiKey := decryptOptional(selected.APIKeyEnc, key)
+	if access == "" && apiKey == "" {
+		respondError(w, http.StatusBadRequest, "selected account has no usable token")
+		return
+	}
+
+	switch provider {
+	case "codex":
+		if err := api.WriteCodexCredentials(access, refresh, idToken, apiKey, selected.AccountID); err != nil {
+			h.logger.Error("failed to activate codex account", "name", name, "error", err)
+			respondError(w, http.StatusInternalServerError, "failed to write codex auth file")
+			return
+		}
+	case "anthropic":
+		var expiresAt *time.Time
+		if selected.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, selected.ExpiresAt); err == nil {
+				expiresAt = &t
+			}
+		}
+		if err := api.WriteAnthropicAccessToken(access, refresh, expiresAt, h.logger); err != nil {
+			h.logger.Error("failed to activate anthropic account", "name", name, "error", err)
+			respondError(w, http.StatusInternalServerError, "failed to write anthropic credentials file")
+			return
+		}
+	default:
+		respondError(w, http.StatusBadRequest, "unsupported provider")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "activated",
+		"provider": provider,
+		"name":     name,
+		"restart":  true,
+	})
+
+	if h.updater != nil {
+		go func() {
+			time.Sleep(1 * time.Second)
+			if err := h.updater.Restart(); err != nil {
+				h.logger.Error("restart after account activation failed", "error", err)
+			}
+		}()
+	}
+}
+
+func (h *Handler) collectAccountConfigs() []config.MultiAccountConfig {
+	accounts := []config.MultiAccountConfig{}
+	if h.config != nil && len(h.config.MultiAccounts) > 0 {
+		accounts = append(accounts, h.config.MultiAccounts...)
+	}
+
+	linked, err := h.listLinkedAccounts()
+	if err != nil {
+		h.logger.Error("failed to load linked accounts", "error", err)
+		return accounts
+	}
+	for _, acct := range linked {
+		token, err := h.decryptLinkedAccountToken(acct)
+		if err != nil || token == "" {
+			continue
+		}
+		accounts = append(accounts, config.MultiAccountConfig{
+			Name:      acct.Name,
+			Provider:  acct.Provider,
+			Token:     token,
+			AccountID: acct.AccountID,
+		})
+	}
+	return accounts
 }
 
 func (h *Handler) fetchWeeklyAccountUsage(acct config.MultiAccountConfig, now time.Time) map[string]interface{} {

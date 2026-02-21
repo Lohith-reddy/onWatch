@@ -2405,6 +2405,32 @@ select.settings-input {
 .settings-test-result.success { color: var(--status-healthy); }
 .settings-test-result.error { color: var(--status-danger); }
 
+.oauth-mono-box {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.oauth-output-box {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 /* Save bar */
 .settings-save-bar {
   display: flex;

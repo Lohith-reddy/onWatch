@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CodexCredentials contains parsed Codex auth state.
@@ -102,4 +104,70 @@ func codexAuthPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".codex", "auth.json")
+}
+
+// WriteCodexCredentials updates Codex auth.json with provided tokens.
+// Empty fields are preserved from existing auth.json when possible.
+func WriteCodexCredentials(accessToken, refreshToken, idToken, apiKey, accountID string) error {
+	authPath := codexAuthPath()
+	if authPath == "" {
+		return os.ErrNotExist
+	}
+
+	var auth codexAuthFile
+	if data, err := os.ReadFile(authPath); err == nil {
+		_ = json.Unmarshal(data, &auth)
+	}
+
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	idToken = strings.TrimSpace(idToken)
+	apiKey = strings.TrimSpace(apiKey)
+	accountID = strings.TrimSpace(accountID)
+
+	if accessToken != "" {
+		auth.Tokens.AccessToken = accessToken
+	}
+	if refreshToken != "" {
+		auth.Tokens.RefreshToken = refreshToken
+	}
+	if idToken != "" {
+		auth.Tokens.IDToken = idToken
+	}
+	if apiKey != "" {
+		auth.OpenAIAPIKey = apiKey
+	}
+	if accountID != "" {
+		auth.Tokens.AccountID = accountID
+	}
+
+	if strings.TrimSpace(auth.Tokens.AccessToken) == "" && strings.TrimSpace(auth.OpenAIAPIKey) == "" {
+		return fmt.Errorf("no usable codex credentials to write")
+	}
+
+	payload := map[string]interface{}{
+		"auth_mode":      "oauth_personal",
+		"OPENAI_API_KEY": auth.OpenAIAPIKey,
+		"tokens": map[string]interface{}{
+			"id_token":      auth.Tokens.IDToken,
+			"access_token":  auth.Tokens.AccessToken,
+			"refresh_token": auth.Tokens.RefreshToken,
+			"account_id":    auth.Tokens.AccountID,
+		},
+		"last_refresh": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	newData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
+		return err
+	}
+	tempPath := authPath + ".tmp"
+	if err := os.WriteFile(tempPath, newData, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, authPath)
 }
