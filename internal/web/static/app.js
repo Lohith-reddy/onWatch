@@ -1762,9 +1762,10 @@ async function fetchAccountUsage() {
       const ok = acct.status === 'ok';
       const key = `${acct.provider}::${acct.name}`;
       const isSelected = selectedKey && key === selectedKey;
+      const isCurrent = acct.isCurrent === true;
       const util = (typeof acct.weeklyUtilization === 'number') ? `${acct.weeklyUtilization.toFixed(1)}%` : '--';
-      const useDisabled = isSelected || !ok;
-      const useLabel = isSelected ? 'Selected' : 'Use This Account';
+      const useDisabled = isCurrent || isSelected || !ok;
+      const useLabel = isCurrent ? 'Current Account' : (isSelected ? 'Selected' : 'Use This Account');
       return `
         <tr>
           <td>${escapeHTML(acct.name || '-')}</td>
@@ -4360,6 +4361,9 @@ function setupOAuthLogin() {
   const startBtn = document.getElementById('oauth-start-btn');
   const result = document.getElementById('oauth-result');
   const details = document.getElementById('oauth-details');
+  const submitBtn = document.getElementById('oauth-submit-btn');
+  const submitInput = document.getElementById('oauth-submit-code');
+  const submitResult = document.getElementById('oauth-submit-result');
   if (!startBtn) return;
 
   startBtn.addEventListener('click', async () => {
@@ -4370,6 +4374,52 @@ function setupOAuthLogin() {
 
     await startOAuthFlow({ provider, name, email, openBrowser });
   });
+
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      const sessionID = State.oauthActiveSessionId || '';
+      const code = submitInput?.value?.trim() || '';
+      if (!sessionID || !code) {
+        if (submitResult) {
+          submitResult.textContent = 'Session and code are required.';
+          submitResult.className = 'settings-test-result error';
+        }
+        return;
+      }
+      submitBtn.disabled = true;
+      if (submitResult) {
+        submitResult.textContent = '';
+        submitResult.className = 'settings-test-result';
+      }
+      try {
+        const resp = await authFetch('/api/oauth/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionID, code }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          if (submitResult) {
+            submitResult.textContent = data.error || 'Failed to submit code.';
+            submitResult.className = 'settings-test-result error';
+          }
+          return;
+        }
+        if (submitResult) {
+          submitResult.textContent = 'Code submitted.';
+          submitResult.className = 'settings-test-result success';
+        }
+        if (submitInput) submitInput.value = '';
+      } catch (e) {
+        if (submitResult) {
+          submitResult.textContent = 'Network error submitting code.';
+          submitResult.className = 'settings-test-result error';
+        }
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  }
 }
 
 async function startOAuthFlow({ provider, name, email, openBrowser }) {
@@ -4438,6 +4488,7 @@ async function startOAuthFlow({ provider, name, email, openBrowser }) {
 
 function renderOAuthDetails(data) {
   const details = document.getElementById('oauth-details');
+  const submitWrap = document.getElementById('oauth-submit-wrap');
   if (!details) return;
   const url = data.url || '';
   const code = data.code || '';
@@ -4463,6 +4514,10 @@ function renderOAuthDetails(data) {
     <div class="oauth-mono-box">${code ? `<code>${escapeHTML(code)}</code>` : 'N/A'}</div>
     ${output ? `<div style="margin-top:8px;"><strong>Session Output</strong></div><pre class="oauth-output-box">${escapeHTML(output)}</pre>` : ''}
   `;
+  if (submitWrap) {
+    const needsManualSubmit = data.provider === 'anthropic' && !data.done;
+    submitWrap.hidden = !needsManualSubmit;
+  }
   bindOAuthCopyButtons(url, code);
 }
 

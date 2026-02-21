@@ -96,6 +96,7 @@ type oauthSession struct {
 	Done      bool
 	Saved     bool
 	Err       string
+	PTY       *os.File
 }
 
 type linkedAccount struct {
@@ -631,6 +632,55 @@ func (h *Handler) OAuthStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// OAuthSubmit submits an interactive OAuth code to a running session (used for Anthropic device auth).
+func (h *Handler) OAuthSubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		SessionID string `json:"session_id"`
+		Code      string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	sessionID := strings.TrimSpace(body.SessionID)
+	code := strings.TrimSpace(body.Code)
+	if sessionID == "" || code == "" {
+		respondError(w, http.StatusBadRequest, "session_id and code are required")
+		return
+	}
+
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	sess, ok := h.oauthSessions[sessionID]
+	if !ok {
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if sess.Done {
+		respondError(w, http.StatusConflict, "session already finished")
+		return
+	}
+	if sess.PTY == nil {
+		respondError(w, http.StatusConflict, "session is not interactive")
+		return
+	}
+
+	if _, err := io.WriteString(sess.PTY, code+"\n"); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to submit code")
+		return
+	}
+	sess.Output += "\n[onWatch] Submitted code from dashboard.\n"
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":     "submitted",
+		"session_id": sessionID,
+	})
+}
+
 func (h *Handler) runOAuthSession(sess *oauthSession, email string, openBrowser bool) {
 	var cmd *exec.Cmd
 	switch sess.Provider {
@@ -653,6 +703,11 @@ func (h *Handler) runOAuthSession(sess *oauthSession, email string, openBrowser 
 		return
 	}
 	defer func() { _ = ptmx.Close() }()
+	h.oauthMu.Lock()
+	if s, ok := h.oauthSessions[sess.ID]; ok {
+		s.PTY = ptmx
+	}
+	h.oauthMu.Unlock()
 
 	reader := bufio.NewReader(ptmx)
 	for {
@@ -680,6 +735,7 @@ func (h *Handler) runOAuthSession(sess *oauthSession, email string, openBrowser 
 		return
 	}
 	s.Done = true
+	s.PTY = nil
 	if waitErr != nil && s.Err == "" {
 		s.Err = "oauth command exited with error"
 	}
@@ -1008,10 +1064,54 @@ func (h *Handler) AccountUsage(w http.ResponseWriter, r *http.Request) {
 
 	results := make([]map[string]interface{}, 0, len(accounts))
 	for _, acct := range accounts {
-		results = append(results, h.fetchWeeklyAccountUsage(acct, now))
+		row := h.fetchWeeklyAccountUsage(acct, now)
+		row["isCurrent"] = h.isCurrentProviderAccount(acct)
+		results = append(results, row)
 	}
 	response["accounts"] = results
 	respondJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) isCurrentProviderAccount(acct config.MultiAccountConfig) bool {
+	provider := strings.ToLower(strings.TrimSpace(acct.Provider))
+	token, accountID, _ := resolveMultiAccountToken(acct, h.logger)
+	token = strings.TrimSpace(token)
+	accountID = strings.TrimSpace(accountID)
+	if token == "" {
+		return false
+	}
+
+	switch provider {
+	case "codex":
+		creds := api.DetectCodexCredentials(h.logger)
+		if creds == nil {
+			return false
+		}
+		activeAccountID := strings.TrimSpace(creds.AccountID)
+		if activeAccountID == "" {
+			activeAccountID = extractAccountIDFromAnyJWT(strings.TrimSpace(creds.IDToken), strings.TrimSpace(creds.AccessToken))
+		}
+		if accountID != "" && activeAccountID != "" {
+			return strings.EqualFold(accountID, activeAccountID)
+		}
+		activeToken := strings.TrimSpace(creds.AccessToken)
+		if activeToken == "" {
+			activeToken = strings.TrimSpace(creds.APIKey)
+		}
+		return activeToken != "" && activeToken == token
+	case "anthropic":
+		creds := api.DetectAnthropicCredentials(h.logger)
+		activeToken := ""
+		if creds != nil {
+			activeToken = strings.TrimSpace(creds.AccessToken)
+		}
+		if activeToken == "" {
+			activeToken = strings.TrimSpace(api.DetectAnthropicToken(h.logger))
+		}
+		return activeToken != "" && activeToken == token
+	default:
+		return false
+	}
 }
 
 func (h *Handler) selectedAccountFromRequest(r *http.Request, provider string) *config.MultiAccountConfig {
