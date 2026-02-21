@@ -34,4 +34,3 @@ func TestParseMultiAccountConfig_InvalidJSON(t *testing.T) {
 		t.Fatalf("expected nil for invalid JSON, got %#v", got)
 	}
 }
-
