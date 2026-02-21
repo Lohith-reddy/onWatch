@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -83,4 +85,28 @@ func DetectAnthropicToken(logger *slog.Logger) string {
 // Returns nil if not found.
 func DetectAnthropicCredentials(logger *slog.Logger) *AnthropicCredentials {
 	return detectAnthropicCredentialsPlatform(logger)
+}
+
+// DetectAnthropicCredentialsFromFile parses Claude credentials JSON from a specific file path.
+func DetectAnthropicCredentialsFromFile(path string, logger *slog.Logger) *AnthropicCredentials {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logger.Debug("Credential file not readable", "path", path, "error", err)
+		return nil
+	}
+
+	creds, err := parseFullClaudeCredentials(data)
+	if err != nil {
+		logger.Debug("Failed to parse full credentials", "path", path, "error", err)
+		return nil
+	}
+	return creds
 }

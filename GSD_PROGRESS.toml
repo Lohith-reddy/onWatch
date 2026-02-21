@@ -1,0 +1,21 @@
+project = "onwatch-multi-account-tracker"
+updated_at = "2026-02-21"
+status = "in_progress"
+
+[[completed]]
+task = "Imported upstream onWatch and created feature branch"
+
+[[completed]]
+task = "Added ONWATCH_MULTI_ACCOUNTS parser with tests"
+
+[[completed]]
+task = "Added /api/accounts/usage endpoint for Codex/Anthropic weekly account checks"
+
+[[completed]]
+task = "Wired dashboard multi-account section and polling hooks"
+
+[[next]]
+task = "Run focused and full test suites"
+
+[[next]]
+task = "Refine UX formatting for error/status states if needed"

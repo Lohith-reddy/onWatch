@@ -246,8 +246,15 @@ Additional environment variables:
 | `ONWATCH_ADMIN_PASS` | Initial dashboard password (default: `changeme`)       |
 | `ONWATCH_LOG_LEVEL`  | Log level: debug, info, warn, error                    |
 | `ONWATCH_HOST`       | Bind address (default: `0.0.0.0`)                      |
+| `ONWATCH_MULTI_ACCOUNTS` | JSON array of Codex/Claude accounts for side-by-side weekly tracking |
 
 CLI flags override environment variables.
+
+`ONWATCH_MULTI_ACCOUNTS` example:
+
+```json
+[{"name":"codex-work","provider":"codex","auth_file":"~/.codex/auth.json"},{"name":"claude-personal","provider":"anthropic","credentials_file":"~/.claude/.credentials.json"}]
+```
 
 ---
 
@@ -269,6 +276,7 @@ All endpoints require authentication (session cookie or Basic Auth). Append `?pr
 | `/api/sessions`                 | GET         | Session history                                |
 | `/api/insights`                 | GET         | Usage insights                                 |
 | `/api/providers`                | GET         | Available providers                            |
+| `/api/accounts/usage`           | GET         | Live weekly usage for configured multi-accounts |
 | `/api/settings`                 | GET/PUT     | User settings (notifications, SMTP, providers) |
 | `/api/settings/smtp/test`       | POST        | Send test email via configured SMTP            |
 | `/api/password`                 | PUT         | Change password                                |

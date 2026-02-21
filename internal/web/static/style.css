@@ -2469,6 +2469,19 @@ select.settings-input {
   border: 1px solid var(--status-danger);
 }
 
+/* Multi-account weekly tracker */
+.accounts-section {
+  margin-bottom: 24px;
+}
+
+#accounts-table td:nth-child(1) {
+  font-weight: 600;
+}
+
+#accounts-table td:nth-child(3) {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Settings page responsive */
 @media (max-width: 768px) {
   .settings-main { padding: 16px; }

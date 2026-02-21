@@ -33,6 +33,7 @@ type Config struct {
 	// Codex provider configuration
 	CodexToken     string // CODEX_TOKEN or auto-detected
 	CodexAutoToken bool   // true if token was auto-detected
+	MultiAccounts  []MultiAccountConfig
 
 	// Shared configuration
 	PollInterval       time.Duration // ONWATCH_POLL_INTERVAL (seconds → Duration)
@@ -145,6 +146,7 @@ func loadFromEnvAndFlags(flags *flagValues) (*Config, error) {
 
 	// Codex provider
 	cfg.CodexToken = strings.TrimSpace(os.Getenv("CODEX_TOKEN"))
+	cfg.MultiAccounts = ParseMultiAccountConfig(os.Getenv("ONWATCH_MULTI_ACCOUNTS"))
 
 	// Poll Interval (seconds) — ONWATCH_* first, SYNTRACK_* fallback
 	if flags.interval > 0 {
