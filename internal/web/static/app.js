@@ -104,7 +104,8 @@ const State = {
   overviewSort: { key: null, dir: 'desc' },
   overviewPage: 1,
   overviewPageSize: 10,
-  accountsFilterName: '',
+  accountsSelectedKey: '',
+  accountsLatestData: [],
 };
 
 // ── Persistence ──
@@ -1683,7 +1684,7 @@ function toggleAccountsSection(show) {
 
 async function fetchAccountUsage() {
   const body = document.getElementById('accounts-usage-body');
-  const filterSelect = document.getElementById('accounts-name-filter');
+  const selector = document.getElementById('accounts-selector');
   if (!body) return;
 
   if (!shouldShowAccountsSection()) {
@@ -1697,26 +1698,33 @@ async function fetchAccountUsage() {
 
     const data = await res.json();
     const accounts = (data && Array.isArray(data.accounts)) ? data.accounts : [];
+    State.accountsLatestData = accounts;
     if (accounts.length === 0) {
       toggleAccountsSection(false);
+      updateActivateAccountButton();
       return;
     }
 
-    if (filterSelect) {
-      const names = [...new Set(accounts.map(a => a.name).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-      const current = filterSelect.value || '';
-      filterSelect.innerHTML = '<option value="">All Accounts</option>' +
-        names.map(n => `<option value="${escapeHTML(n)}">${escapeHTML(n)}</option>`).join('');
-      if (current && names.includes(current)) {
-        filterSelect.value = current;
+    if (selector) {
+      const options = accounts
+        .filter(a => a && a.name && a.provider)
+        .map(a => ({ key: `${a.provider}::${a.name}`, label: `${a.name} (${a.provider})` }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      const current = selector.value || '';
+      selector.innerHTML = '<option value="">All Accounts</option>' +
+        options.map(o => `<option value="${escapeHTML(o.key)}">${escapeHTML(o.label)}</option>`).join('');
+      if (current && options.some(o => o.key === current)) {
+        selector.value = current;
       } else {
-        filterSelect.value = '';
+        selector.value = '';
       }
-      State.accountsFilterName = filterSelect.value || '';
+      State.accountsSelectedKey = selector.value || '';
     }
 
-    const selectedName = State.accountsFilterName || '';
-    const visibleAccounts = selectedName ? accounts.filter(a => (a.name || '').toLowerCase() === selectedName.toLowerCase()) : accounts;
+    const selectedKey = State.accountsSelectedKey || '';
+    const visibleAccounts = selectedKey
+      ? accounts.filter(a => `${a.provider}::${a.name}` === selectedKey)
+      : accounts;
 
     toggleAccountsSection(true);
     body.innerHTML = visibleAccounts.map(acct => {
@@ -1730,63 +1738,84 @@ async function fetchAccountUsage() {
           <td>${acct.weeklyLimitEndsAt ? formatDateTime(acct.weeklyLimitEndsAt) : '--'}</td>
           <td>${acct.renewalAt ? formatDateTime(acct.renewalAt) : '--'}</td>
           <td><span class="status-badge" data-status="${ok ? 'healthy' : 'danger'}">${ok ? 'Healthy' : `Error: ${escapeHTML(acct.error || 'request failed')}`}</span></td>
-          <td>${ok ? `<button class="settings-test-btn settings-test-btn-sm account-use-btn" data-provider="${escapeHTML(acct.provider || '')}" data-name="${escapeHTML(acct.name || '')}" type="button">Use Account</button>` : ''}</td>
         </tr>
       `;
     }).join('');
     if (visibleAccounts.length === 0) {
-      body.innerHTML = '<tr><td colspan="7" class="empty-state">No accounts match this filter.</td></tr>';
-    } else {
-      bindAccountUseButtons();
+      body.innerHTML = '<tr><td colspan="6" class="empty-state">No accounts match this filter.</td></tr>';
     }
+    updateActivateAccountButton();
   } catch (err) {
     toggleAccountsSection(true);
-    body.innerHTML = '<tr><td colspan="7" class="empty-state">Unable to load multi-account usage.</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">Unable to load multi-account usage.</td></tr>';
+    updateActivateAccountButton();
   }
 }
 
-function bindAccountUseButtons() {
-  document.querySelectorAll('.account-use-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const provider = btn.dataset.provider || '';
-      const name = btn.dataset.name || '';
-      if (!provider || !name) return;
-      if (!confirm(`Switch ${provider} auth to account "${name}" and restart onWatch now?`)) return;
+function updateActivateAccountButton() {
+  const btn = document.getElementById('account-activate-btn');
+  if (!btn) return;
+  const key = State.accountsSelectedKey || '';
+  if (!key) {
+    btn.disabled = true;
+    return;
+  }
+  const selected = State.accountsLatestData.find(a => `${a.provider}::${a.name}` === key);
+  btn.disabled = !selected || selected.status !== 'ok';
+}
 
-      btn.disabled = true;
-      const prev = btn.textContent;
-      btn.textContent = 'Switching...';
-      try {
-        const resp = await authFetch('/api/accounts/activate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ provider, name })
-        });
-        const data = await resp.json();
-        if (!resp.ok) {
-          alert(data.error || 'Failed to switch account');
-          btn.disabled = false;
-          btn.textContent = prev;
-          return;
-        }
-        btn.textContent = 'Restarting...';
-        // Same restart detection approach used by update flow.
-        setTimeout(() => pollForRestart(), 1000);
-      } catch (e) {
-        alert('Network error while switching account');
-        btn.disabled = false;
-        btn.textContent = prev;
-      }
-    });
+function setupAccountSelector() {
+  const select = document.getElementById('accounts-selector');
+  if (!select) return;
+  select.addEventListener('change', () => {
+    State.accountsSelectedKey = select.value || '';
+    fetchAccountUsage();
   });
 }
 
-function setupAccountFilter() {
-  const select = document.getElementById('accounts-name-filter');
-  if (!select) return;
-  select.addEventListener('change', () => {
-    State.accountsFilterName = select.value || '';
-    fetchAccountUsage();
+function setupActivateAccountButton() {
+  const btn = document.getElementById('account-activate-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const key = State.accountsSelectedKey || '';
+    if (!key) {
+      alert('Select an account first.');
+      return;
+    }
+
+    const selected = State.accountsLatestData.find(a => `${a.provider}::${a.name}` === key);
+    if (!selected || selected.status !== 'ok') {
+      alert('Selected account is not currently healthy.');
+      return;
+    }
+
+    const provider = selected.provider || '';
+    const name = selected.name || '';
+    if (!confirm(`Use account "${name}" for ${provider} and restart now?`)) return;
+
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = 'Switching...';
+    try {
+      const resp = await authFetch('/api/accounts/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, name })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.error || 'Failed to switch account');
+        btn.disabled = false;
+        btn.textContent = prev;
+        return;
+      }
+      btn.textContent = 'Restarting...';
+      setTimeout(() => pollForRestart(), 1000);
+    } catch (e) {
+      alert('Network error while switching account');
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
   });
 }
 
@@ -4806,7 +4835,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPasswordToggle();
   setupTableControls();
   setupOverviewControls();
-  setupAccountFilter();
+  setupAccountSelector();
+  setupActivateAccountButton();
   setupHeaderActions();
   setupCardModals();
 
