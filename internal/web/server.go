@@ -54,6 +54,8 @@ func NewServer(port int, handler *Handler, logger *slog.Logger, username, passwo
 	mux.HandleFunc("/api/sessions", handler.Sessions)
 	mux.HandleFunc("/api/insights", handler.Insights)
 	mux.HandleFunc("/api/accounts/usage", handler.AccountUsage)
+	mux.HandleFunc("/api/oauth/start", handler.OAuthStart)
+	mux.HandleFunc("/api/oauth/status", handler.OAuthStatus)
 	mux.HandleFunc("/api/settings", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
 			handler.UpdateSettings(w, r)

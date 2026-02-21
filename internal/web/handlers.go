@@ -1,20 +1,25 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/onllm-dev/onwatch/internal/api"
 	"github.com/onllm-dev/onwatch/internal/config"
 	"github.com/onllm-dev/onwatch/internal/notify"
@@ -73,6 +78,19 @@ type Handler struct {
 	pushTestMu       sync.Mutex
 	pushTestLastSent time.Time
 	rateLimiter      *LoginRateLimiter // Per-IP rate limiting for login attempts
+	oauthSessions    map[string]*oauthSession
+	oauthMu          sync.RWMutex
+}
+
+type oauthSession struct {
+	ID        string
+	Provider  string
+	URL       string
+	Code      string
+	Output    string
+	StartedAt time.Time
+	Done      bool
+	Err       string
 }
 
 // NewHandler creates a new Handler instance
@@ -111,6 +129,7 @@ func NewHandler(store *store.Store, tracker *tracker.Tracker, logger *slog.Logge
 		settingsTmpl:  settingsTmpl,
 		sessions:      sessions,
 		config:        cfg,
+		oauthSessions: make(map[string]*oauthSession),
 	}
 	if len(zaiTracker) > 0 && zaiTracker[0] != nil {
 		h.zaiTracker = zaiTracker[0]
@@ -485,6 +504,218 @@ func (h *Handler) Current(w http.ResponseWriter, r *http.Request) {
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
 	}
+}
+
+// OAuthStart starts a provider login flow and returns the login URL/code for manual browser/profile choice.
+func (h *Handler) OAuthStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Provider    string `json:"provider"`
+		Email       string `json:"email"`
+		OpenBrowser bool   `json:"open_browser"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(body.Provider))
+	if provider != "codex" && provider != "anthropic" {
+		respondError(w, http.StatusBadRequest, "provider must be codex or anthropic")
+		return
+	}
+
+	sess := &oauthSession{
+		ID:        fmt.Sprintf("oauth-%d", time.Now().UnixNano()),
+		Provider:  provider,
+		StartedAt: time.Now().UTC(),
+	}
+	h.oauthMu.Lock()
+	h.oauthSessions[sess.ID] = sess
+	h.oauthMu.Unlock()
+
+	go h.runOAuthSession(sess, strings.TrimSpace(body.Email), body.OpenBrowser)
+
+	// Wait briefly for initial URL/code extraction.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		h.oauthMu.RLock()
+		current := *sess
+		h.oauthMu.RUnlock()
+		if current.URL != "" || current.Err != "" {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	h.oauthMu.RLock()
+	current := *sess
+	h.oauthMu.RUnlock()
+
+	resp := map[string]interface{}{
+		"session_id": current.ID,
+		"provider":   current.Provider,
+		"url":        current.URL,
+		"code":       current.Code,
+		"done":       current.Done,
+		"error":      current.Err,
+		"output":     current.Output,
+	}
+	respondJSON(w, http.StatusOK, resp)
+}
+
+// OAuthStatus returns current output/state for a running OAuth session.
+func (h *Handler) OAuthStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		respondError(w, http.StatusBadRequest, "missing id")
+		return
+	}
+
+	h.oauthMu.RLock()
+	sess, ok := h.oauthSessions[id]
+	if !ok {
+		h.oauthMu.RUnlock()
+		respondError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	current := *sess
+	h.oauthMu.RUnlock()
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": current.ID,
+		"provider":   current.Provider,
+		"url":        current.URL,
+		"code":       current.Code,
+		"done":       current.Done,
+		"error":      current.Err,
+		"output":     current.Output,
+	})
+}
+
+func (h *Handler) runOAuthSession(sess *oauthSession, email string, openBrowser bool) {
+	var cmd *exec.Cmd
+	switch sess.Provider {
+	case "codex":
+		cmd = exec.Command("codex", "login", "--device-auth")
+	case "anthropic":
+		args := []string{"auth", "login"}
+		if email != "" {
+			args = append(args, "--email", email)
+		}
+		cmd = exec.Command("claude", args...)
+	default:
+		h.markOAuthError(sess.ID, "unsupported provider")
+		return
+	}
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		h.markOAuthError(sess.ID, "failed to start oauth command")
+		return
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	reader := bufio.NewReader(ptmx)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			h.appendOAuthOutput(sess.ID, line)
+			h.extractOAuthURLAndCode(sess.ID, line, openBrowser)
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				h.markOAuthError(sess.ID, "oauth session interrupted")
+			}
+			break
+		}
+	}
+
+	waitErr := cmd.Wait()
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	s, ok := h.oauthSessions[sess.ID]
+	if !ok {
+		return
+	}
+	s.Done = true
+	if waitErr != nil && s.Err == "" {
+		s.Err = "oauth command exited with error"
+	}
+}
+
+func (h *Handler) appendOAuthOutput(id, line string) {
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	sess, ok := h.oauthSessions[id]
+	if !ok {
+		return
+	}
+	sess.Output += line
+	if len(sess.Output) > 20000 {
+		sess.Output = sess.Output[len(sess.Output)-20000:]
+	}
+}
+
+func (h *Handler) extractOAuthURLAndCode(id, line string, openBrowser bool) {
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	sess, ok := h.oauthSessions[id]
+	if !ok {
+		return
+	}
+
+	urlRe := regexp.MustCompile(`https://[^\s]+`)
+	if sess.URL == "" {
+		if m := urlRe.FindString(line); m != "" {
+			sess.URL = m
+			if openBrowser {
+				go openURLInDefaultBrowser(m)
+			}
+		}
+	}
+
+	if sess.Provider == "codex" && sess.Code == "" {
+		codeRe := regexp.MustCompile(`[A-Z0-9]{4}-[A-Z0-9]{5}`)
+		if m := codeRe.FindString(line); m != "" {
+			sess.Code = m
+		}
+	}
+}
+
+func (h *Handler) markOAuthError(id, msg string) {
+	h.oauthMu.Lock()
+	defer h.oauthMu.Unlock()
+	sess, ok := h.oauthSessions[id]
+	if !ok {
+		return
+	}
+	sess.Err = msg
+	sess.Done = true
+}
+
+func openURLInDefaultBrowser(url string) {
+	var cmd *exec.Cmd
+	switch {
+	case runtimeGOOS() == "darwin":
+		cmd = exec.Command("open", url)
+	case runtimeGOOS() == "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
+}
+
+var runtimeGOOS = func() string {
+	return runtime.GOOS
 }
 
 // AccountUsage returns live weekly usage for configured multi-accounts.
