@@ -2415,6 +2415,37 @@ select.settings-input {
   font-size: 12px;
   line-height: 1.5;
   word-break: break-all;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.oauth-mono-box code,
+.oauth-mono-box a,
+.oauth-output-box {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.oauth-copy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.oauth-copy-btn {
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.oauth-copy-btn:hover {
+  border-color: var(--accent-teal);
+  color: var(--accent-teal);
 }
 
 .oauth-output-box {

@@ -4415,12 +4415,61 @@ function renderOAuthDetails(data) {
     <div><strong>Account:</strong> ${escapeHTML(accountName)}</div>
     <div><strong>Provider:</strong> ${escapeHTML(data.provider || '-')}</div>
     <div><strong>Status:</strong> ${escapeHTML(statusText)}${data.saved ? ' (saved)' : ''}</div>
-    <div style="margin-top:8px;"><strong>OAuth URL</strong></div>
+    <div class="oauth-copy-row">
+      <strong>OAuth URL</strong>
+      ${url ? '<button class="oauth-copy-btn" data-copy-type="url" type="button">Copy URL</button>' : ''}
+    </div>
     <div class="oauth-mono-box">${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${escapeHTML(url)}</a>` : 'Waiting...'}</div>
-    <div style="margin-top:8px;"><strong>Code</strong></div>
+    <div class="oauth-copy-row">
+      <strong>Code</strong>
+      ${code ? '<button class="oauth-copy-btn" data-copy-type="code" type="button">Copy Code</button>' : ''}
+    </div>
     <div class="oauth-mono-box">${code ? `<code>${escapeHTML(code)}</code>` : 'N/A'}</div>
     ${output ? `<div style="margin-top:8px;"><strong>Session Output</strong></div><pre class="oauth-output-box">${escapeHTML(output)}</pre>` : ''}
   `;
+  bindOAuthCopyButtons(url, code);
+}
+
+function bindOAuthCopyButtons(url, code) {
+  document.querySelectorAll('#oauth-details .oauth-copy-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const copyType = btn.dataset.copyType || '';
+      const text = copyType === 'url' ? (url || '') : (code || '');
+      if (!text) return;
+      const ok = await copyTextToClipboard(text);
+      if (ok) {
+        const prev = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+      }
+    });
+  });
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) {
+    // fallback below
+  }
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (e) {
+    return false;
+  }
 }
 
 function pollOAuthStatus(sessionId) {
