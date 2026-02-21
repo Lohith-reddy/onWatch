@@ -44,6 +44,8 @@ var loginErrors = map[string]string{
 	LoginErrorRateLimit: "Too many login attempts. Please try again later.",
 }
 
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 // Notifier defines the interface for the notification engine.
 // The concrete implementation lives in internal/notify.
 type Notifier interface {
@@ -665,6 +667,8 @@ func (h *Handler) appendOAuthOutput(id, line string) {
 }
 
 func (h *Handler) extractOAuthURLAndCode(id, line string, openBrowser bool) {
+	cleanLine := stripANSIEscapes(line)
+
 	h.oauthMu.Lock()
 	defer h.oauthMu.Unlock()
 	sess, ok := h.oauthSessions[id]
@@ -674,20 +678,31 @@ func (h *Handler) extractOAuthURLAndCode(id, line string, openBrowser bool) {
 
 	urlRe := regexp.MustCompile(`https://[^\s]+`)
 	if sess.URL == "" {
-		if m := urlRe.FindString(line); m != "" {
-			sess.URL = m
+		if m := urlRe.FindString(cleanLine); m != "" {
+			sess.URL = normalizeDetectedURL(m)
 			if openBrowser {
-				go openURLInDefaultBrowser(m)
+				go openURLInDefaultBrowser(sess.URL)
 			}
 		}
 	}
 
 	if sess.Provider == "codex" && sess.Code == "" {
 		codeRe := regexp.MustCompile(`[A-Z0-9]{4}-[A-Z0-9]{5}`)
-		if m := codeRe.FindString(line); m != "" {
+		if m := codeRe.FindString(cleanLine); m != "" {
 			sess.Code = m
 		}
 	}
+}
+
+func stripANSIEscapes(text string) string {
+	return ansiEscapeRegex.ReplaceAllString(text, "")
+}
+
+func normalizeDetectedURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	// Trim common trailing punctuation from terminal output.
+	s = strings.TrimRight(s, `"'.,);`)
+	return s
 }
 
 func (h *Handler) markOAuthError(id, msg string) {
