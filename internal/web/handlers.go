@@ -1031,6 +1031,280 @@ func (h *Handler) selectedAccountFromRequest(r *http.Request, provider string) *
 	return nil
 }
 
+func quotaMapsFromCurrent(current map[string]interface{}) []map[string]interface{} {
+	raw, ok := current["quotas"]
+	if !ok {
+		return nil
+	}
+	items, ok := raw.([]map[string]interface{})
+	if ok {
+		return items
+	}
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	quotas := make([]map[string]interface{}, 0, len(arr))
+	for _, item := range arr {
+		if m, ok := item.(map[string]interface{}); ok {
+			quotas = append(quotas, m)
+		}
+	}
+	return quotas
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+func buildScopedHistoryFromCurrent(current map[string]interface{}) []map[string]interface{} {
+	capturedAt, _ := current["capturedAt"].(string)
+	if capturedAt == "" {
+		capturedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	entry := map[string]interface{}{
+		"capturedAt": capturedAt,
+	}
+	for _, q := range quotaMapsFromCurrent(current) {
+		name, _ := q["name"].(string)
+		if name == "" {
+			continue
+		}
+		if util, ok := toFloat64(q["utilization"]); ok {
+			entry[name] = util
+		}
+	}
+	return []map[string]interface{}{entry}
+}
+
+func defaultQuotaWindow(name string) time.Duration {
+	switch name {
+	case "five_hour":
+		return 5 * time.Hour
+	case "seven_day", "seven_day_sonnet", "code_review":
+		return 7 * 24 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+func buildScopedCyclesFromCurrent(current map[string]interface{}, quotaName string) []map[string]interface{} {
+	quotas := quotaMapsFromCurrent(current)
+	now := time.Now().UTC()
+	rows := make([]map[string]interface{}, 0, 1)
+	for _, q := range quotas {
+		name, _ := q["name"].(string)
+		if name == "" || name != quotaName {
+			continue
+		}
+		util, _ := toFloat64(q["utilization"])
+		var resetsAt *time.Time
+		if s, _ := q["resetsAt"].(string); s != "" {
+			if t, err := time.Parse(time.RFC3339, s); err == nil {
+				resetsAt = &t
+			}
+		}
+		cycleStart := now.Add(-defaultQuotaWindow(name))
+		if resetsAt != nil {
+			cycleStart = resetsAt.Add(-defaultQuotaWindow(name))
+		}
+		row := map[string]interface{}{
+			"id":              1,
+			"quotaName":       name,
+			"cycleStart":      cycleStart.Format(time.RFC3339),
+			"cycleEnd":        nil,
+			"peakUtilization": util,
+			"totalDelta":      0.0,
+		}
+		if resetsAt != nil {
+			row["resetsAt"] = resetsAt.Format(time.RFC3339)
+		}
+		rows = append(rows, row)
+		break
+	}
+	return rows
+}
+
+func buildScopedSummaryFromCurrent(current map[string]interface{}) map[string]interface{} {
+	response := map[string]interface{}{}
+	for _, q := range quotaMapsFromCurrent(current) {
+		name, _ := q["name"].(string)
+		if name == "" {
+			continue
+		}
+		util, _ := toFloat64(q["utilization"])
+		item := map[string]interface{}{
+			"quotaName":       name,
+			"currentUtil":     util,
+			"currentRate":     0.0,
+			"projectedUtil":   util,
+			"completedCycles": 0,
+			"avgPerCycle":     0.0,
+			"peakCycle":       util,
+			"totalTracked":    util,
+		}
+		if resetsAt, _ := q["resetsAt"].(string); resetsAt != "" {
+			item["resetsAt"] = resetsAt
+		}
+		if timeUntilReset, _ := q["timeUntilReset"].(string); timeUntilReset != "" {
+			item["timeUntilReset"] = timeUntilReset
+		}
+		response[name] = item
+	}
+	return response
+}
+
+func buildScopedInsightsFromCurrent(provider string, current map[string]interface{}) insightsResponse {
+	resp := insightsResponse{
+		Stats:    []insightStat{},
+		Insights: []insightItem{},
+	}
+	if account, _ := current["account"].(string); account != "" {
+		resp.Stats = append(resp.Stats, insightStat{
+			Value: account,
+			Label: "Account",
+		})
+	}
+	if provider == "codex" {
+		if plan, _ := current["planType"].(string); plan != "" {
+			resp.Stats = append(resp.Stats, insightStat{
+				Value: codexPlanLabel(plan),
+				Label: "Plan",
+			})
+		}
+	}
+	for _, q := range quotaMapsFromCurrent(current) {
+		name, _ := q["name"].(string)
+		displayName, _ := q["displayName"].(string)
+		if displayName == "" {
+			displayName = name
+		}
+		util, _ := toFloat64(q["utilization"])
+		sev := codexInsightSeverity(util)
+		if provider == "anthropic" {
+			sev = anthropicUtilStatus(util)
+		}
+		resp.Insights = append(resp.Insights, insightItem{
+			Key:      "current_" + name,
+			Type:     "factual",
+			Severity: sev,
+			Title:    displayName + " Usage",
+			Metric:   fmt.Sprintf("%.1f%%", util),
+			Desc:     fmt.Sprintf("%s is currently at %.1f%% utilization for this linked account.", displayName, util),
+		})
+	}
+	if len(resp.Insights) == 0 {
+		resp.Insights = append(resp.Insights, insightItem{
+			Type:     "info",
+			Severity: "info",
+			Title:    "No Account Data",
+			Desc:     "No quota data is available yet for this account.",
+		})
+	}
+	return resp
+}
+
+func buildScopedCycleOverviewFromCurrent(provider string, current map[string]interface{}, groupBy string) map[string]interface{} {
+	quotas := quotaMapsFromCurrent(current)
+	if len(quotas) == 0 {
+		return map[string]interface{}{
+			"groupBy":    groupBy,
+			"provider":   provider,
+			"quotaNames": []string{},
+			"cycles":     []map[string]interface{}{},
+		}
+	}
+
+	quotaNames := make([]string, 0, len(quotas))
+	quotaByName := map[string]map[string]interface{}{}
+	for _, q := range quotas {
+		name, _ := q["name"].(string)
+		if name == "" {
+			continue
+		}
+		quotaNames = append(quotaNames, name)
+		quotaByName[name] = q
+	}
+	sort.SliceStable(quotaNames, func(i, j int) bool {
+		if provider == "codex" {
+			return codexQuotaDisplayOrder(quotaNames[i]) < codexQuotaDisplayOrder(quotaNames[j])
+		}
+		return quotaNames[i] < quotaNames[j]
+	})
+
+	if groupBy == "" {
+		groupBy = quotaNames[0]
+	}
+
+	groupQuota, ok := quotaByName[groupBy]
+	if !ok {
+		groupQuota = quotaByName[quotaNames[0]]
+		groupBy = quotaNames[0]
+	}
+	groupUtil, _ := toFloat64(groupQuota["utilization"])
+
+	capturedAt, _ := current["capturedAt"].(string)
+	if capturedAt == "" {
+		capturedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	capturedAtTime, _ := time.Parse(time.RFC3339, capturedAt)
+	if capturedAtTime.IsZero() {
+		capturedAtTime = time.Now().UTC()
+	}
+	cycleStart := capturedAtTime.Add(-defaultQuotaWindow(groupBy))
+	if resetsAt, _ := groupQuota["resetsAt"].(string); resetsAt != "" {
+		if rt, err := time.Parse(time.RFC3339, resetsAt); err == nil {
+			cycleStart = rt.Add(-defaultQuotaWindow(groupBy))
+		}
+	}
+
+	cross := make([]map[string]interface{}, 0, len(quotaNames))
+	for _, name := range quotaNames {
+		util, _ := toFloat64(quotaByName[name]["utilization"])
+		cross = append(cross, map[string]interface{}{
+			"name":         name,
+			"value":        util,
+			"limit":        100.0,
+			"percent":      util,
+			"startPercent": util,
+			"delta":        0.0,
+		})
+	}
+
+	return map[string]interface{}{
+		"groupBy":    groupBy,
+		"provider":   provider,
+		"quotaNames": quotaNames,
+		"cycles": []map[string]interface{}{
+			{
+				"cycleId":     1,
+				"quotaType":   groupBy,
+				"cycleStart":  cycleStart.Format(time.RFC3339),
+				"cycleEnd":    nil,
+				"peakValue":   groupUtil,
+				"totalDelta":  0.0,
+				"peakTime":    capturedAtTime.Format(time.RFC3339),
+				"crossQuotas": cross,
+			},
+		},
+	}
+}
+
 // ActivateAccount writes the selected linked account credentials into provider auth files and restarts onWatch.
 func (h *Handler) ActivateAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1724,6 +1998,8 @@ func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
 // historyBoth returns both providers' history.
 func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 
 	rangeStr := r.URL.Query().Get("range")
 	duration, err := parseTimeRange(rangeStr)
@@ -1797,25 +2073,29 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.config.HasProvider("anthropic") && h.store != nil {
-		snapshots, err := h.store.QueryAnthropicRange(start, now)
-		if err == nil {
-			step := downsampleStep(len(snapshots), maxChartPoints)
-			last := len(snapshots) - 1
-			anthData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
-			for i, snap := range snapshots {
-				if step > 1 && i != 0 && i != last && i%step != 0 {
-					continue
+	if h.config.HasProvider("anthropic") {
+		if selectedAnthropic != nil {
+			response["anthropic"] = buildScopedHistoryFromCurrent(h.buildAnthropicCurrentForAccount(*selectedAnthropic))
+		} else if h.store != nil {
+			snapshots, err := h.store.QueryAnthropicRange(start, now)
+			if err == nil {
+				step := downsampleStep(len(snapshots), maxChartPoints)
+				last := len(snapshots) - 1
+				anthData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
+				for i, snap := range snapshots {
+					if step > 1 && i != 0 && i != last && i%step != 0 {
+						continue
+					}
+					entry := map[string]interface{}{
+						"capturedAt": snap.CapturedAt.Format(time.RFC3339),
+					}
+					for _, q := range snap.Quotas {
+						entry[q.Name] = q.Utilization
+					}
+					anthData = append(anthData, entry)
 				}
-				entry := map[string]interface{}{
-					"capturedAt": snap.CapturedAt.Format(time.RFC3339),
-				}
-				for _, q := range snap.Quotas {
-					entry[q.Name] = q.Utilization
-				}
-				anthData = append(anthData, entry)
+				response["anthropic"] = anthData
 			}
-			response["anthropic"] = anthData
 		}
 	}
 
@@ -1843,25 +2123,29 @@ func (h *Handler) historyBoth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.config.HasProvider("codex") && h.store != nil {
-		snapshots, err := h.store.QueryCodexRange(start, now)
-		if err == nil {
-			step := downsampleStep(len(snapshots), maxChartPoints)
-			last := len(snapshots) - 1
-			codexData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
-			for i, snap := range snapshots {
-				if step > 1 && i != 0 && i != last && i%step != 0 {
-					continue
+	if h.config.HasProvider("codex") {
+		if selectedCodex != nil {
+			response["codex"] = buildScopedHistoryFromCurrent(h.buildCodexCurrentForAccount(*selectedCodex))
+		} else if h.store != nil {
+			snapshots, err := h.store.QueryCodexRange(start, now)
+			if err == nil {
+				step := downsampleStep(len(snapshots), maxChartPoints)
+				last := len(snapshots) - 1
+				codexData := make([]map[string]interface{}, 0, min(len(snapshots), maxChartPoints))
+				for i, snap := range snapshots {
+					if step > 1 && i != 0 && i != last && i%step != 0 {
+						continue
+					}
+					entry := map[string]interface{}{
+						"capturedAt": snap.CapturedAt.Format(time.RFC3339),
+					}
+					for _, q := range snap.Quotas {
+						entry[q.Name] = q.Utilization
+					}
+					codexData = append(codexData, entry)
 				}
-				entry := map[string]interface{}{
-					"capturedAt": snap.CapturedAt.Format(time.RFC3339),
-				}
-				for _, q := range snap.Quotas {
-					entry[q.Name] = q.Utilization
-				}
-				codexData = append(codexData, entry)
+				response["codex"] = codexData
 			}
-			response["codex"] = codexData
 		}
 	}
 
@@ -2014,6 +2298,8 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, response)
 		return
 	}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 
 	if h.config.HasProvider("synthetic") {
 		quotaType := r.URL.Query().Get("type")
@@ -2054,16 +2340,20 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 		if anthType == "" {
 			anthType = "five_hour"
 		}
-		var anthCycles []map[string]interface{}
-		if active, err := h.store.QueryActiveAnthropicCycle(anthType); err == nil && active != nil {
-			anthCycles = append(anthCycles, anthropicCycleToMap(active))
-		}
-		if history, err := h.store.QueryAnthropicCycleHistory(anthType, 200); err == nil {
-			for _, c := range history {
-				anthCycles = append(anthCycles, anthropicCycleToMap(c))
+		if selectedAnthropic != nil {
+			response["anthropic"] = buildScopedCyclesFromCurrent(h.buildAnthropicCurrentForAccount(*selectedAnthropic), anthType)
+		} else {
+			var anthCycles []map[string]interface{}
+			if active, err := h.store.QueryActiveAnthropicCycle(anthType); err == nil && active != nil {
+				anthCycles = append(anthCycles, anthropicCycleToMap(active))
 			}
+			if history, err := h.store.QueryAnthropicCycleHistory(anthType, 200); err == nil {
+				for _, c := range history {
+					anthCycles = append(anthCycles, anthropicCycleToMap(c))
+				}
+			}
+			response["anthropic"] = anthCycles
 		}
-		response["anthropic"] = anthCycles
 	}
 
 	if h.config.HasProvider("codex") {
@@ -2074,16 +2364,20 @@ func (h *Handler) cyclesBoth(w http.ResponseWriter, r *http.Request) {
 		if codexType == "" {
 			codexType = "five_hour"
 		}
-		var codexCycles []map[string]interface{}
-		if active, err := h.store.QueryActiveCodexCycle(codexType); err == nil && active != nil {
-			codexCycles = append(codexCycles, codexCycleToMap(active))
-		}
-		if history, err := h.store.QueryCodexCycleHistory(codexType, 200); err == nil {
-			for _, c := range history {
-				codexCycles = append(codexCycles, codexCycleToMap(c))
+		if selectedCodex != nil {
+			response["codex"] = buildScopedCyclesFromCurrent(h.buildCodexCurrentForAccount(*selectedCodex), codexType)
+		} else {
+			var codexCycles []map[string]interface{}
+			if active, err := h.store.QueryActiveCodexCycle(codexType); err == nil && active != nil {
+				codexCycles = append(codexCycles, codexCycleToMap(active))
 			}
+			if history, err := h.store.QueryCodexCycleHistory(codexType, 200); err == nil {
+				for _, c := range history {
+					codexCycles = append(codexCycles, codexCycleToMap(c))
+				}
+			}
+			response["codex"] = codexCycles
 		}
-		response["codex"] = codexCycles
 	}
 
 	respondJSON(w, http.StatusOK, response)
@@ -2258,6 +2552,8 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 // summaryBoth returns combined summaries from all configured providers.
 func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 	if h.config.HasProvider("synthetic") {
 		synResp := map[string]interface{}{
 			"subscription": buildEmptySummaryResponse("subscription"),
@@ -2281,13 +2577,21 @@ func (h *Handler) summaryBoth(w http.ResponseWriter, r *http.Request) {
 		response["zai"] = h.buildZaiSummaryMap()
 	}
 	if h.config.HasProvider("anthropic") {
-		response["anthropic"] = h.buildAnthropicSummaryMap()
+		if selectedAnthropic != nil {
+			response["anthropic"] = buildScopedSummaryFromCurrent(h.buildAnthropicCurrentForAccount(*selectedAnthropic))
+		} else {
+			response["anthropic"] = h.buildAnthropicSummaryMap()
+		}
 	}
 	if h.config.HasProvider("copilot") {
 		response["copilot"] = h.buildCopilotSummaryMap()
 	}
 	if h.config.HasProvider("codex") {
-		response["codex"] = h.buildCodexSummaryMap()
+		if selectedCodex != nil {
+			response["codex"] = buildScopedSummaryFromCurrent(h.buildCodexCurrentForAccount(*selectedCodex))
+		} else {
+			response["codex"] = h.buildCodexSummaryMap()
+		}
 	}
 	respondJSON(w, http.StatusOK, response)
 }
@@ -2515,6 +2819,11 @@ func (h *Handler) Sessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if (provider == "anthropic" || provider == "codex") && h.selectedAccountFromRequest(r, provider) != nil {
+		respondJSON(w, http.StatusOK, []map[string]interface{}{})
+		return
+	}
+
 	sessions, err := h.store.QuerySessionHistory(provider)
 	if err != nil {
 		h.logger.Error("failed to query sessions", "error", err)
@@ -2551,6 +2860,8 @@ func (h *Handler) Sessions(w http.ResponseWriter, r *http.Request) {
 // sessionsBoth returns sessions from both providers.
 func (h *Handler) sessionsBoth(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 
 	buildSessionList := func(provider string) []map[string]interface{} {
 		sessions, err := h.store.QuerySessionHistory(provider)
@@ -2587,13 +2898,21 @@ func (h *Handler) sessionsBoth(w http.ResponseWriter, r *http.Request) {
 		response["zai"] = buildSessionList("zai")
 	}
 	if h.config.HasProvider("anthropic") {
-		response["anthropic"] = buildSessionList("anthropic")
+		if selectedAnthropic != nil {
+			response["anthropic"] = []map[string]interface{}{}
+		} else {
+			response["anthropic"] = buildSessionList("anthropic")
+		}
 	}
 	if h.config.HasProvider("copilot") {
 		response["copilot"] = buildSessionList("copilot")
 	}
 	if h.config.HasProvider("codex") {
-		response["codex"] = buildSessionList("codex")
+		if selectedCodex != nil {
+			response["codex"] = []map[string]interface{}{}
+		} else {
+			response["codex"] = buildSessionList("codex")
+		}
 	}
 
 	respondJSON(w, http.StatusOK, response)
@@ -2698,6 +3017,8 @@ func (h *Handler) Insights(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
 	hidden := h.getHiddenInsightKeys()
 	response := map[string]interface{}{}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 
 	if h.config.HasProvider("synthetic") {
 		response["synthetic"] = h.buildSyntheticInsights(hidden, rangeDur)
@@ -2706,13 +3027,21 @@ func (h *Handler) insightsBoth(w http.ResponseWriter, r *http.Request, rangeDur 
 		response["zai"] = h.buildZaiInsights(hidden)
 	}
 	if h.config.HasProvider("anthropic") {
-		response["anthropic"] = h.buildAnthropicInsights(hidden, rangeDur)
+		if selectedAnthropic != nil {
+			response["anthropic"] = buildScopedInsightsFromCurrent("anthropic", h.buildAnthropicCurrentForAccount(*selectedAnthropic))
+		} else {
+			response["anthropic"] = h.buildAnthropicInsights(hidden, rangeDur)
+		}
 	}
 	if h.config.HasProvider("copilot") {
 		response["copilot"] = h.buildCopilotInsights(hidden, rangeDur)
 	}
 	if h.config.HasProvider("codex") {
-		response["codex"] = h.buildCodexInsights(hidden, rangeDur)
+		if selectedCodex != nil {
+			response["codex"] = buildScopedInsightsFromCurrent("codex", h.buildCodexCurrentForAccount(*selectedCodex))
+		} else {
+			response["codex"] = h.buildCodexInsights(hidden, rangeDur)
+		}
 	}
 
 	respondJSON(w, http.StatusOK, response)
@@ -3355,6 +3684,10 @@ func anthropicUtilStatus(util float64) string {
 
 // historyAnthropic returns Anthropic usage history.
 func (h *Handler) historyAnthropic(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedHistoryFromCurrent(h.buildAnthropicCurrentForAccount(*acct)))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, []interface{}{})
 		return
@@ -3394,6 +3727,14 @@ func (h *Handler) historyAnthropic(w http.ResponseWriter, r *http.Request) {
 // cyclesAnthropic returns per-minute Anthropic snapshot data as cycle-shaped rows.
 // Each polled snapshot becomes a row, enabling 1m/5m/30m/1h grouping in the frontend.
 func (h *Handler) cyclesAnthropic(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		quotaName := r.URL.Query().Get("type")
+		if quotaName == "" {
+			quotaName = "five_hour"
+		}
+		respondJSON(w, http.StatusOK, buildScopedCyclesFromCurrent(h.buildAnthropicCurrentForAccount(*acct), quotaName))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, []interface{}{})
 		return
@@ -3465,6 +3806,10 @@ func anthropicCycleToMap(cycle *store.AnthropicResetCycle) map[string]interface{
 
 // summaryAnthropic returns Anthropic usage summary.
 func (h *Handler) summaryAnthropic(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedSummaryFromCurrent(h.buildAnthropicCurrentForAccount(*acct)))
+		return
+	}
 	respondJSON(w, http.StatusOK, h.buildAnthropicSummaryMap())
 }
 
@@ -3509,6 +3854,10 @@ func buildAnthropicSummaryResponse(summary *tracker.AnthropicSummary) map[string
 
 // insightsAnthropic returns Anthropic deep analytics.
 func (h *Handler) insightsAnthropic(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedInsightsFromCurrent("anthropic", h.buildAnthropicCurrentForAccount(*acct)))
+		return
+	}
 	hidden := h.getHiddenInsightKeys()
 	respondJSON(w, http.StatusOK, h.buildAnthropicInsights(hidden, rangeDur))
 }
@@ -4833,6 +5182,14 @@ func (h *Handler) cycleOverviewZai(w http.ResponseWriter, r *http.Request) {
 
 // cycleOverviewAnthropic returns Anthropic cycle overview with cross-quota data.
 func (h *Handler) cycleOverviewAnthropic(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "anthropic"); acct != nil {
+		groupBy := r.URL.Query().Get("groupBy")
+		if groupBy == "" {
+			groupBy = "five_hour"
+		}
+		respondJSON(w, http.StatusOK, buildScopedCycleOverviewFromCurrent("anthropic", h.buildAnthropicCurrentForAccount(*acct), groupBy))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}})
 		return
@@ -4881,6 +5238,8 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, http.StatusOK, response)
 		return
 	}
+	selectedAnthropic := h.selectedAccountFromRequest(r, "anthropic")
+	selectedCodex := h.selectedAccountFromRequest(r, "codex")
 
 	limit := parseCycleOverviewLimit(r)
 
@@ -4919,7 +5278,9 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 		if groupBy == "" {
 			groupBy = "five_hour"
 		}
-		if rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit); err == nil {
+		if selectedAnthropic != nil {
+			response["anthropic"] = buildScopedCycleOverviewFromCurrent("anthropic", h.buildAnthropicCurrentForAccount(*selectedAnthropic), groupBy)
+		} else if rows, err := h.store.QueryAnthropicCycleOverview(groupBy, limit); err == nil {
 			quotaNames := []string{}
 			for _, row := range rows {
 				if len(row.CrossQuotas) > 0 {
@@ -4976,7 +5337,9 @@ func (h *Handler) cycleOverviewBoth(w http.ResponseWriter, r *http.Request) {
 		if groupBy == "" {
 			groupBy = "five_hour"
 		}
-		if rows, err := h.store.QueryCodexCycleOverview(groupBy, limit); err == nil {
+		if selectedCodex != nil {
+			response["codex"] = buildScopedCycleOverviewFromCurrent("codex", h.buildCodexCurrentForAccount(*selectedCodex), groupBy)
+		} else if rows, err := h.store.QueryCodexCycleOverview(groupBy, limit); err == nil {
 			quotaNames := []string{}
 			for _, row := range rows {
 				if len(row.CrossQuotas) > 0 {
@@ -5461,16 +5824,7 @@ func (h *Handler) buildCodexCurrent() map[string]interface{} {
 		response["creditsBalance"] = *latest.CreditsBalance
 	}
 
-	orderedQuotas := make([]api.CodexQuota, len(latest.Quotas))
-	copy(orderedQuotas, latest.Quotas)
-	sort.SliceStable(orderedQuotas, func(i, j int) bool {
-		left := codexQuotaDisplayOrder(orderedQuotas[i].Name)
-		right := codexQuotaDisplayOrder(orderedQuotas[j].Name)
-		if left != right {
-			return left < right
-		}
-		return orderedQuotas[i].Name < orderedQuotas[j].Name
-	})
+	orderedQuotas := normalizeCodexQuotasByPlan(latest.PlanType, latest.Quotas)
 
 	quotas := make([]map[string]interface{}, 0, len(orderedQuotas))
 	for _, q := range orderedQuotas {
@@ -5547,8 +5901,9 @@ func (h *Handler) buildCodexCurrentForAccount(acct config.MultiAccountConfig) ma
 		response["creditsBalance"] = *snap.CreditsBalance
 	}
 
-	quotas := make([]map[string]interface{}, 0, len(snap.Quotas))
-	for _, q := range snap.Quotas {
+	normalizedQuotas := normalizeCodexQuotasByPlan(snap.PlanType, snap.Quotas)
+	quotas := make([]map[string]interface{}, 0, len(normalizedQuotas))
+	for _, q := range normalizedQuotas {
 		headroom := 100 - q.Utilization
 		if headroom < 0 {
 			headroom = 0
@@ -5581,6 +5936,41 @@ func (h *Handler) buildCodexCurrentForAccount(acct config.MultiAccountConfig) ma
 	}
 	response["quotas"] = quotas
 	return response
+}
+
+func normalizeCodexQuotasByPlan(planType string, quotas []api.CodexQuota) []api.CodexQuota {
+	normalized := make([]api.CodexQuota, len(quotas))
+	copy(normalized, quotas)
+
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	hasFiveHour := false
+	for _, q := range normalized {
+		if q.Name == "five_hour" {
+			hasFiveHour = true
+			break
+		}
+	}
+
+	// Go-plan can omit five_hour window from API payload.
+	// Treat it as fully consumed so dashboard card remains deterministic.
+	if planType == "go" && !hasFiveHour {
+		normalized = append(normalized, api.CodexQuota{
+			Name:        "five_hour",
+			Utilization: 100,
+			Status:      codexUtilStatus(100),
+		})
+	}
+
+	sort.SliceStable(normalized, func(i, j int) bool {
+		left := codexQuotaDisplayOrder(normalized[i].Name)
+		right := codexQuotaDisplayOrder(normalized[j].Name)
+		if left != right {
+			return left < right
+		}
+		return normalized[i].Name < normalized[j].Name
+	})
+
+	return normalized
 }
 
 func codexUtilStatus(util float64) string {
@@ -5623,6 +6013,10 @@ func codexRemainingStatus(remaining float64) string {
 }
 
 func (h *Handler) historyCodex(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedHistoryFromCurrent(h.buildCodexCurrentForAccount(*acct)))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, []interface{}{})
 		return
@@ -5657,6 +6051,14 @@ func (h *Handler) historyCodex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) cyclesCodex(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		quotaName := r.URL.Query().Get("type")
+		if quotaName == "" {
+			quotaName = "five_hour"
+		}
+		respondJSON(w, http.StatusOK, buildScopedCyclesFromCurrent(h.buildCodexCurrentForAccount(*acct), quotaName))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, []interface{}{})
 		return
@@ -5721,6 +6123,10 @@ func codexCycleToMap(cycle *store.CodexResetCycle) map[string]interface{} {
 }
 
 func (h *Handler) summaryCodex(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedSummaryFromCurrent(h.buildCodexCurrentForAccount(*acct)))
+		return
+	}
 	respondJSON(w, http.StatusOK, h.buildCodexSummaryMap())
 }
 
@@ -5764,6 +6170,10 @@ func buildCodexSummaryResponse(summary *tracker.CodexSummary) map[string]interfa
 }
 
 func (h *Handler) insightsCodex(w http.ResponseWriter, r *http.Request, rangeDur time.Duration) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		respondJSON(w, http.StatusOK, buildScopedInsightsFromCurrent("codex", h.buildCodexCurrentForAccount(*acct)))
+		return
+	}
 	hidden := h.getHiddenInsightKeys()
 	respondJSON(w, http.StatusOK, h.buildCodexInsights(hidden, rangeDur))
 }
@@ -6049,6 +6459,14 @@ func (h *Handler) buildCodexWeeklyPaceInsight(latest *api.CodexSnapshot, summari
 }
 
 func (h *Handler) cycleOverviewCodex(w http.ResponseWriter, r *http.Request) {
+	if acct := h.selectedAccountFromRequest(r, "codex"); acct != nil {
+		groupBy := r.URL.Query().Get("groupBy")
+		if groupBy == "" {
+			groupBy = "five_hour"
+		}
+		respondJSON(w, http.StatusOK, buildScopedCycleOverviewFromCurrent("codex", h.buildCodexCurrentForAccount(*acct), groupBy))
+		return
+	}
 	if h.store == nil {
 		respondJSON(w, http.StatusOK, map[string]interface{}{"cycles": []interface{}{}})
 		return

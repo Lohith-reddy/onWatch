@@ -69,6 +69,13 @@ function getSelectedAccountRef() {
   return { provider: parts[0], name: parts.slice(1).join('::') };
 }
 
+function accountScopeQuery(provider) {
+  const selected = getSelectedAccountRef();
+  if (!selected) return '';
+  if (provider !== 'both' && provider !== selected.provider) return '';
+  return `&account_provider=${encodeURIComponent(selected.provider)}&account_name=${encodeURIComponent(selected.name)}`;
+}
+
 // ── Global State ──
 const State = {
   chart: null,
@@ -582,7 +589,7 @@ async function loadAnthropicModalChart(quotaName) {
   const range = activeRange ? activeRange.dataset.range : '6h';
 
   try {
-    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=anthropic`);
+    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=anthropic${accountScopeQuery('anthropic')}`);
     if (!res.ok) return;
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) return;
@@ -621,7 +628,7 @@ async function loadAnthropicModalChart(quotaName) {
 
 async function loadAnthropicModalCycles(quotaName) {
   try {
-    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=anthropic`);
+    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=anthropic${accountScopeQuery('anthropic')}`);
     if (!res.ok) return;
     const cycles = await res.json();
     const tbody = document.getElementById('modal-cycles-tbody');
@@ -1106,7 +1113,7 @@ async function loadCodexModalChart(quotaName) {
   const range = activeRange ? activeRange.dataset.range : '6h';
 
   try {
-    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=codex`);
+    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=codex${accountScopeQuery('codex')}`);
     if (!res.ok) return;
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) return;
@@ -1145,7 +1152,7 @@ async function loadCodexModalChart(quotaName) {
 
 async function loadCodexModalCycles(quotaName) {
   try {
-    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=codex`);
+    const res = await authFetch(`${API_BASE}/api/cycles?type=${quotaName}&provider=codex${accountScopeQuery('codex')}`);
     if (!res.ok) return;
     const cycles = await res.json();
     const tbody = document.getElementById('modal-cycles-tbody');
@@ -1786,6 +1793,10 @@ function setupAccountSelector() {
     State.accountsSelectedKey = select.value || '';
     fetchAccountUsage();
     fetchCurrent();
+    fetchDeepInsights();
+    fetchHistory();
+    fetchCycles();
+    fetchSessions();
   });
 }
 
@@ -1925,11 +1936,10 @@ async function fetchDeepInsights() {
   renderInsightsRangePills();
 
   try {
-    const res = await authFetch(`${API_BASE}/api/insights?${providerParam()}&range=${State.insightsRange}`);
+    const provider = getCurrentProvider();
+    const res = await authFetch(`${API_BASE}/api/insights?${providerParam()}&range=${State.insightsRange}${accountScopeQuery(provider)}`);
     if (!res.ok) throw new Error('Failed to fetch insights');
     const data = await res.json();
-
-    const provider = getCurrentProvider();
 
     if (provider === 'both') {
       // "both" mode: render two separate provider boxes
@@ -2362,11 +2372,10 @@ async function fetchHistory(range) {
     range = activeBtn ? activeBtn.dataset.range : '6h';
   }
   try {
-    const res = await authFetch(`${API_BASE}/api/history?range=${range}&${providerParam()}`);
+    const provider = getCurrentProvider();
+    const res = await authFetch(`${API_BASE}/api/history?range=${range}&${providerParam()}${accountScopeQuery(provider)}`);
     if (!res.ok) throw new Error('Failed to fetch history');
     const data = await res.json();
-
-    const provider = getCurrentProvider();
 
     if (provider === 'both') {
       // "both" response: { synthetic: [...], zai: [...] }
@@ -2692,7 +2701,7 @@ async function fetchCycles() {
     groupBy = 'five_hour';
   }
 
-  const url = `/api/cycle-overview?${providerParam()}&groupBy=${groupBy}&limit=200`;
+  const url = `/api/cycle-overview?${providerParam()}&groupBy=${groupBy}&limit=200${accountScopeQuery(provider)}`;
 
   try {
     const res = await authFetch(url);
@@ -2858,10 +2867,10 @@ function renderCyclesTable() {
 
 async function fetchSessions() {
   try {
-    const res = await authFetch(`${API_BASE}/api/sessions?${providerParam()}`);
+    const provider = getCurrentProvider();
+    const res = await authFetch(`${API_BASE}/api/sessions?${providerParam()}${accountScopeQuery(provider)}`);
     if (!res.ok) throw new Error('Failed to fetch sessions');
     const data = await res.json();
-    const provider = getCurrentProvider();
 
     if (provider === 'both') {
       // "both" response: { synthetic: [...], zai: [...], anthropic: [...], codex: [...] }
@@ -3327,7 +3336,7 @@ async function loadModalChart(quotaType, effectiveProvider) {
 
   const provider = effectiveProvider || getCurrentProvider();
   try {
-    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=${provider}`);
+    const res = await authFetch(`${API_BASE}/api/history?range=${range}&provider=${provider}${accountScopeQuery(provider)}`);
     if (!res.ok) return;
     const data = await res.json();
     if (!Array.isArray(data) || data.length === 0) return;
@@ -3406,7 +3415,7 @@ async function loadModalCycles(quotaType, effectiveProvider) {
     apiType = quotaType === 'toolCalls' ? 'toolcall' : quotaType;
   }
   try {
-    const res = await authFetch(`${API_BASE}/api/cycles?type=${apiType}&provider=${provider}`);
+    const res = await authFetch(`${API_BASE}/api/cycles?type=${apiType}&provider=${provider}${accountScopeQuery(provider)}`);
     if (!res.ok) return;
     const cycles = await res.json();
 
