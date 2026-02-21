@@ -106,6 +106,7 @@ const State = {
   overviewPageSize: 10,
   accountsSelectedKey: '',
   accountsLatestData: [],
+  linkedAccounts: [],
 };
 
 // ── Persistence ──
@@ -4109,6 +4110,9 @@ async function loadSettings() {
     } else {
       populateProviderToggles({});
     }
+
+    State.linkedAccounts = Array.isArray(data.linked_accounts) ? data.linked_accounts : [];
+    renderLinkedAccounts(State.linkedAccounts);
   } catch (e) {
     // Settings load failed silently
   }
@@ -4344,60 +4348,72 @@ function setupOAuthLogin() {
     const email = document.getElementById('oauth-email')?.value?.trim() || '';
     const openBrowser = document.getElementById('oauth-open-browser')?.checked !== false;
 
-    if (!name) {
+    await startOAuthFlow({ provider, name, email, openBrowser });
+  });
+}
+
+async function startOAuthFlow({ provider, name, email, openBrowser }) {
+  const startBtn = document.getElementById('oauth-start-btn');
+  const result = document.getElementById('oauth-result');
+  const details = document.getElementById('oauth-details');
+
+  if (!name) {
+    if (result) {
+      result.textContent = 'Account name is required.';
+      result.className = 'settings-test-result error';
+    }
+    return;
+  }
+
+  if (startBtn) {
+    startBtn.disabled = true;
+    startBtn.textContent = 'Starting...';
+  }
+  if (result) {
+    result.textContent = '';
+    result.className = 'settings-test-result';
+  }
+  if (details) details.hidden = true;
+
+  try {
+    const resp = await authFetch('/api/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, name, email, open_browser: openBrowser })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
       if (result) {
-        result.textContent = 'Account name is required.';
+        result.textContent = data.error || 'Failed to start OAuth';
         result.className = 'settings-test-result error';
       }
       return;
     }
 
-    startBtn.disabled = true;
-    startBtn.textContent = 'Starting...';
     if (result) {
-      result.textContent = '';
-      result.className = 'settings-test-result';
+      result.textContent = 'OAuth started. Complete sign-in in browser.';
+      result.className = 'settings-test-result success';
     }
-    if (details) details.hidden = true;
 
-    try {
-      const resp = await authFetch('/api/oauth/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, name, email, open_browser: openBrowser })
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        if (result) {
-          result.textContent = data.error || 'Failed to start OAuth';
-          result.className = 'settings-test-result error';
-        }
-        return;
-      }
-
-      if (result) {
-        result.textContent = 'OAuth started. Complete sign-in in browser.';
-        result.className = 'settings-test-result success';
-      }
-
-      // Keep only the most recent OAuth flow active in UI.
-      if (State.oauthPollTimer) {
-        clearInterval(State.oauthPollTimer);
-        State.oauthPollTimer = null;
-      }
-      State.oauthActiveSessionId = data.session_id || '';
-      renderOAuthDetails(data);
-      if (data.session_id) pollOAuthStatus(data.session_id);
-    } catch (e) {
-      if (result) {
-        result.textContent = 'Network error starting OAuth.';
-        result.className = 'settings-test-result error';
-      }
-    } finally {
+    // Keep only the most recent OAuth flow active in UI.
+    if (State.oauthPollTimer) {
+      clearInterval(State.oauthPollTimer);
+      State.oauthPollTimer = null;
+    }
+    State.oauthActiveSessionId = data.session_id || '';
+    renderOAuthDetails(data);
+    if (data.session_id) pollOAuthStatus(data.session_id);
+  } catch (e) {
+    if (result) {
+      result.textContent = 'Network error starting OAuth.';
+      result.className = 'settings-test-result error';
+    }
+  } finally {
+    if (startBtn) {
       startBtn.disabled = false;
       startBtn.textContent = 'Start OAuth Login';
     }
-  });
+  }
 }
 
 function renderOAuthDetails(data) {
@@ -4501,6 +4517,9 @@ function pollOAuthStatus(sessionId) {
         if (data.done || attempts >= maxAttempts) {
           clearInterval(timer);
           if (State.oauthPollTimer === timer) State.oauthPollTimer = null;
+          if (data.done && data.saved) {
+            loadSettings();
+          }
         }
       } else {
         clearInterval(timer);
@@ -4513,6 +4532,93 @@ function pollOAuthStatus(sessionId) {
   }, 5000);
 
   State.oauthPollTimer = timer;
+}
+
+function renderLinkedAccounts(accounts) {
+  const list = document.getElementById('linked-accounts-list');
+  if (!list) return;
+
+  const linked = Array.isArray(accounts) ? accounts : [];
+  if (linked.length === 0) {
+    list.innerHTML = '<div class="linked-account-empty">No linked accounts yet.</div>';
+    return;
+  }
+
+  const sorted = [...linked].sort((a, b) => {
+    const al = `${a.name || ''} ${a.provider || ''}`.toLowerCase();
+    const bl = `${b.name || ''} ${b.provider || ''}`.toLowerCase();
+    return al.localeCompare(bl);
+  });
+
+  list.innerHTML = sorted.map(acct => {
+    const provider = acct.provider || '';
+    const name = acct.name || '';
+    const accountID = acct.account_id || '';
+    return `
+      <div class="linked-account-item">
+        <div class="linked-account-meta">
+          <div class="linked-account-title">${escapeHTML(name)} <span class="badge">${escapeHTML(provider)}</span></div>
+          <div class="linked-account-sub">${accountID ? `Account ID: ${escapeHTML(accountID)}` : 'Account ID: not detected yet'}</div>
+        </div>
+        <div class="linked-account-actions">
+          <button class="settings-test-btn settings-test-btn-sm linked-account-reauth" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Re-authenticate</button>
+          <button class="settings-test-btn settings-test-btn-sm linked-account-delete" type="button" data-provider="${escapeHTML(provider)}" data-name="${escapeHTML(name)}">Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  list.querySelectorAll('.linked-account-delete').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider || '';
+      const name = btn.dataset.name || '';
+      if (!provider || !name) return;
+      if (!confirm(`Delete linked account "${name}" (${provider})?`)) return;
+      await deleteLinkedAccount(provider, name);
+    });
+  });
+
+  list.querySelectorAll('.linked-account-reauth').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider || '';
+      const name = btn.dataset.name || '';
+      if (!provider || !name) return;
+      const providerInput = document.getElementById('oauth-provider');
+      const nameInput = document.getElementById('oauth-account-name');
+      if (providerInput) providerInput.value = provider;
+      if (nameInput) nameInput.value = name;
+      await startOAuthFlow({ provider, name, email: '', openBrowser: true });
+    });
+  });
+}
+
+async function deleteLinkedAccount(provider, name) {
+  const result = document.getElementById('linked-accounts-result');
+  try {
+    const resp = await authFetch('/api/accounts/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, name }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      if (result) {
+        result.textContent = data.error || 'Failed to delete account.';
+        result.className = 'settings-test-result error';
+      }
+      return;
+    }
+    if (result) {
+      result.textContent = `Deleted ${name} (${provider}).`;
+      result.className = 'settings-test-result success';
+    }
+    await loadSettings();
+  } catch (e) {
+    if (result) {
+      result.textContent = 'Network error deleting account.';
+      result.className = 'settings-test-result error';
+    }
+  }
 }
 
 function setupPushNotifications() {

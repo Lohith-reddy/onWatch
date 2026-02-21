@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -846,6 +847,42 @@ func decryptOptional(valueEnc, key string) string {
 	return strings.TrimSpace(plain)
 }
 
+func extractAccountIDFromJWT(idToken string) string {
+	idToken = strings.TrimSpace(idToken)
+	if idToken == "" {
+		return ""
+	}
+	parts := strings.Split(idToken, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	for _, key := range []string{"account_id", "accountId", "aid"} {
+		if v, ok := claims[key]; ok {
+			if s, ok := v.(string); ok {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func extractAccountIDFromAnyJWT(tokens ...string) string {
+	for _, tok := range tokens {
+		if id := extractAccountIDFromJWT(tok); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 func encryptOptional(value, key string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || key == "" {
@@ -888,6 +925,9 @@ func (h *Handler) captureAndSaveOAuthAccount(sessionID string) {
 			idToken = strings.TrimSpace(creds.IDToken)
 			apiKey = strings.TrimSpace(creds.APIKey)
 			accountID = strings.TrimSpace(creds.AccountID)
+		}
+		if accountID == "" {
+			accountID = extractAccountIDFromAnyJWT(idToken, token)
 		}
 	case "anthropic":
 		creds := api.DetectAnthropicCredentials(h.logger)
@@ -1069,6 +1109,59 @@ func (h *Handler) ActivateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// DeleteLinkedAccount removes a linked account by provider+name.
+func (h *Handler) DeleteLinkedAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var body struct {
+		Provider string `json:"provider"`
+		Name     string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(body.Provider))
+	name := strings.TrimSpace(body.Name)
+	if provider == "" || name == "" {
+		respondError(w, http.StatusBadRequest, "provider and name are required")
+		return
+	}
+
+	linked, err := h.listLinkedAccounts()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load linked accounts")
+		return
+	}
+
+	updated := make([]linkedAccount, 0, len(linked))
+	removed := false
+	for _, acct := range linked {
+		if strings.EqualFold(acct.Provider, provider) && strings.EqualFold(acct.Name, name) {
+			removed = true
+			continue
+		}
+		updated = append(updated, acct)
+	}
+	if !removed {
+		respondError(w, http.StatusNotFound, "linked account not found")
+		return
+	}
+
+	if err := h.saveLinkedAccounts(updated); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save linked accounts")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "deleted",
+		"provider": provider,
+		"name":     name,
+	})
+}
+
 func (h *Handler) collectAccountConfigs() []config.MultiAccountConfig {
 	accounts := []config.MultiAccountConfig{}
 	if h.config != nil && len(h.config.MultiAccounts) > 0 {
@@ -1080,16 +1173,22 @@ func (h *Handler) collectAccountConfigs() []config.MultiAccountConfig {
 		h.logger.Error("failed to load linked accounts", "error", err)
 		return accounts
 	}
+	key := h.encryptionKeyForAccounts()
 	for _, acct := range linked {
 		token, err := h.decryptLinkedAccountToken(acct)
 		if err != nil || token == "" {
 			continue
 		}
+		accountID := strings.TrimSpace(acct.AccountID)
+		if accountID == "" {
+			idToken := decryptOptional(acct.IDTokenEnc, key)
+			accountID = extractAccountIDFromAnyJWT(idToken, token)
+		}
 		accounts = append(accounts, config.MultiAccountConfig{
 			Name:      acct.Name,
 			Provider:  acct.Provider,
 			Token:     token,
-			AccountID: acct.AccountID,
+			AccountID: accountID,
 		})
 	}
 	return accounts
@@ -3913,6 +4012,20 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal([]byte(visJSON), &vis) == nil {
 				result["provider_visibility"] = vis
 			}
+		}
+
+		if linked, err := h.listLinkedAccounts(); err == nil {
+			public := make([]map[string]interface{}, 0, len(linked))
+			for _, acct := range linked {
+				public = append(public, map[string]interface{}{
+					"provider":   acct.Provider,
+					"name":       acct.Name,
+					"account_id": acct.AccountID,
+					"created_at": acct.CreatedAt,
+					"updated_at": acct.UpdatedAt,
+				})
+			}
+			result["linked_accounts"] = public
 		}
 	}
 
