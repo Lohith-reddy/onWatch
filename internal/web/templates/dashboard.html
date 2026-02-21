@@ -62,6 +62,38 @@
             </p>
         </div>
 
+        <section class="accounts-section" id="accounts-section" hidden>
+            <header class="section-header">
+                <h3 class="section-title">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                        <circle cx="9" cy="7" r="4"/>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    </svg>
+                    Multi-Account Weekly Tracker
+                </h3>
+            </header>
+            <div class="table-wrapper">
+                <table class="data-table" id="accounts-table">
+                    <thead>
+                        <tr>
+                            <th>Account</th>
+                            <th>Provider</th>
+                            <th>Weekly Usage</th>
+                            <th>Weekly Limit End</th>
+                            <th>Renewal Time</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="accounts-usage-body">
+                        <tr>
+                            <td colspan="6" class="empty-state">No multi-account data yet.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
         {{if eq .CurrentProvider "both"}}
         <!-- All configured providers side-by-side -->
         <div class="both-view" id="both-view" data-provider="both">

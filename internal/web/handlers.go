@@ -1,11 +1,13 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -482,6 +484,180 @@ func (h *Handler) Current(w http.ResponseWriter, r *http.Request) {
 		h.currentCodex(w, r)
 	default:
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown provider: %s", provider))
+	}
+}
+
+// AccountUsage returns live weekly usage for configured multi-accounts.
+func (h *Handler) AccountUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		respondError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	now := time.Now().UTC()
+	response := map[string]interface{}{
+		"capturedAt": now.Format(time.RFC3339),
+		"accounts":   []map[string]interface{}{},
+	}
+	if h.config == nil || len(h.config.MultiAccounts) == 0 {
+		respondJSON(w, http.StatusOK, response)
+		return
+	}
+
+	results := make([]map[string]interface{}, 0, len(h.config.MultiAccounts))
+	for _, acct := range h.config.MultiAccounts {
+		results = append(results, h.fetchWeeklyAccountUsage(acct, now))
+	}
+	response["accounts"] = results
+	respondJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) fetchWeeklyAccountUsage(acct config.MultiAccountConfig, now time.Time) map[string]interface{} {
+	row := map[string]interface{}{
+		"name":        acct.Name,
+		"provider":    acct.Provider,
+		"status":      "error",
+		"checkedAt":   now.Format(time.RFC3339),
+		"weeklyQuota": "",
+	}
+
+	token, accountID, source := resolveMultiAccountToken(acct, h.logger)
+	row["source"] = source
+	if token == "" {
+		row["error"] = "missing token"
+		return row
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	switch acct.Provider {
+	case "codex":
+		client := api.NewCodexClient(token, h.logger)
+		if accountID != "" {
+			client.SetAccountID(accountID)
+		}
+		usage, err := client.FetchUsage(ctx)
+		if err != nil {
+			row["error"] = sanitizeAccountUsageError(err)
+			return row
+		}
+		snap := usage.ToSnapshot(now)
+		for _, q := range snap.Quotas {
+			if q.Name != "seven_day" {
+				continue
+			}
+			row["weeklyQuota"] = q.Name
+			row["weeklyDisplayName"] = api.CodexDisplayName(q.Name)
+			row["weeklyUtilization"] = q.Utilization
+			if q.ResetsAt != nil {
+				dur := time.Until(*q.ResetsAt)
+				row["weeklyLimitEndsAt"] = q.ResetsAt.Format(time.RFC3339)
+				row["renewalAt"] = q.ResetsAt.Format(time.RFC3339)
+				row["timeUntilRenewal"] = formatDuration(dur)
+				row["timeUntilRenewalSeconds"] = int64(dur.Seconds())
+			}
+			row["status"] = "ok"
+			return row
+		}
+		row["error"] = "weekly quota not found"
+		return row
+
+	case "anthropic":
+		client := api.NewAnthropicClient(token, h.logger)
+		usage, err := client.FetchQuotas(ctx)
+		if err != nil {
+			row["error"] = sanitizeAccountUsageError(err)
+			return row
+		}
+		snap := usage.ToSnapshot(now)
+		quotaOrder := []string{"seven_day", "seven_day_sonnet"}
+		for _, name := range quotaOrder {
+			for _, q := range snap.Quotas {
+				if q.Name != name {
+					continue
+				}
+				row["weeklyQuota"] = q.Name
+				row["weeklyDisplayName"] = api.AnthropicDisplayName(q.Name)
+				row["weeklyUtilization"] = q.Utilization
+				if q.ResetsAt != nil {
+					dur := time.Until(*q.ResetsAt)
+					row["weeklyLimitEndsAt"] = q.ResetsAt.Format(time.RFC3339)
+					row["renewalAt"] = q.ResetsAt.Format(time.RFC3339)
+					row["timeUntilRenewal"] = formatDuration(dur)
+					row["timeUntilRenewalSeconds"] = int64(dur.Seconds())
+				}
+				row["status"] = "ok"
+				return row
+			}
+		}
+		row["error"] = "weekly quota not found"
+		return row
+	}
+
+	row["error"] = "unsupported provider"
+	return row
+}
+
+func resolveMultiAccountToken(acct config.MultiAccountConfig, logger *slog.Logger) (token string, accountID string, source string) {
+	if token = strings.TrimSpace(acct.Token); token != "" {
+		return token, strings.TrimSpace(acct.AccountID), "token"
+	}
+	if envKey := strings.TrimSpace(acct.TokenEnv); envKey != "" {
+		if token = strings.TrimSpace(os.Getenv(envKey)); token != "" {
+			return token, strings.TrimSpace(acct.AccountID), "token_env:" + envKey
+		}
+	}
+
+	switch acct.Provider {
+	case "codex":
+		if authFile := strings.TrimSpace(acct.AuthFile); authFile != "" {
+			creds := api.DetectCodexCredentialsFromPath(authFile, logger)
+			if creds == nil {
+				return "", "", "auth_file:" + authFile
+			}
+			token = strings.TrimSpace(creds.AccessToken)
+			if token == "" {
+				token = strings.TrimSpace(creds.APIKey)
+			}
+			if token == "" {
+				return "", "", "auth_file:" + authFile
+			}
+			accountID = strings.TrimSpace(acct.AccountID)
+			if accountID == "" {
+				accountID = strings.TrimSpace(creds.AccountID)
+			}
+			return token, accountID, "auth_file:" + authFile
+		}
+	case "anthropic":
+		if credFile := strings.TrimSpace(acct.CredentialsFile); credFile != "" {
+			creds := api.DetectAnthropicCredentialsFromFile(credFile, logger)
+			if creds == nil {
+				return "", "", "credentials_file:" + credFile
+			}
+			token = strings.TrimSpace(creds.AccessToken)
+			if token == "" {
+				return "", "", "credentials_file:" + credFile
+			}
+			return token, "", "credentials_file:" + credFile
+		}
+	}
+
+	return "", "", "none"
+}
+
+func sanitizeAccountUsageError(err error) string {
+	if err == nil {
+		return "request failed"
+	}
+	errText := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errText, "unauthorized"), strings.Contains(errText, "forbidden"):
+		return "authentication failed"
+	case strings.Contains(errText, "timeout"), strings.Contains(errText, "network"):
+		return "network error"
+	default:
+		return "usage request failed"
 	}
 }
 

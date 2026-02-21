@@ -1197,6 +1197,16 @@ function formatDateTime(isoString) {
   return d.toLocaleString('en-US', opts);
 }
 
+function escapeHTML(value) {
+  if (value == null) return '';
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 
 function getThemeColors() {
   const style = getComputedStyle(document.documentElement);
@@ -1656,6 +1666,58 @@ async function fetchCurrent() {
     // fetch error — cards show fallback state
     const statusDot = document.getElementById('status-dot');
     if (statusDot) statusDot.classList.add('stale');
+  }
+}
+
+function shouldShowAccountsSection() {
+  const provider = getCurrentProvider();
+  return provider === 'codex' || provider === 'anthropic' || provider === 'both';
+}
+
+function toggleAccountsSection(show) {
+  const section = document.getElementById('accounts-section');
+  if (!section) return;
+  section.hidden = !show;
+}
+
+async function fetchAccountUsage() {
+  const body = document.getElementById('accounts-usage-body');
+  if (!body) return;
+
+  if (!shouldShowAccountsSection()) {
+    toggleAccountsSection(false);
+    return;
+  }
+
+  try {
+    const res = await authFetch(`${API_BASE}/api/accounts/usage`);
+    if (!res.ok) throw new Error('Failed to fetch account usage');
+
+    const data = await res.json();
+    const accounts = (data && Array.isArray(data.accounts)) ? data.accounts : [];
+    if (accounts.length === 0) {
+      toggleAccountsSection(false);
+      return;
+    }
+
+    toggleAccountsSection(true);
+    body.innerHTML = accounts.map(acct => {
+      const ok = acct.status === 'ok';
+      const util = (typeof acct.weeklyUtilization === 'number') ? `${acct.weeklyUtilization.toFixed(1)}%` : '--';
+      return `
+        <tr>
+          <td>${escapeHTML(acct.name || '-')}</td>
+          <td><span class="badge">${escapeHTML(acct.provider || '-')}</span></td>
+          <td>${util}</td>
+          <td>${acct.weeklyLimitEndsAt ? formatDateTime(acct.weeklyLimitEndsAt) : '--'}</td>
+          <td>${acct.renewalAt ? formatDateTime(acct.renewalAt) : '--'}</td>
+          <td><span class="status-badge" data-status="${ok ? 'healthy' : 'danger'}">${ok ? 'Healthy' : `Error: ${escapeHTML(acct.error || 'request failed')}`}</span></td>
+        </tr>
+      `;
+    }).join('');
+  } catch (err) {
+    toggleAccountsSection(true);
+    body.innerHTML = '<tr><td colspan="6" class="empty-state">Unable to load multi-account usage.</td></tr>';
   }
 }
 
@@ -3672,6 +3734,7 @@ function setupHeaderActions() {
       refreshBtn.classList.add('spinning');
       Promise.all([
         fetchCurrent(),
+        fetchAccountUsage(),
         fetchDeepInsights(),
         fetchHistory(),
         fetchCycles(),
@@ -3718,7 +3781,7 @@ function startAutoRefresh() {
   if (State.refreshInterval) clearInterval(State.refreshInterval);
   State.refreshInterval = setInterval(() => {
     // Always refresh above-fold data
-    fetchCurrent(); fetchDeepInsights(); fetchHistory();
+    fetchCurrent(); fetchAccountUsage(); fetchDeepInsights(); fetchHistory();
     // Only refresh below-fold sections that have been loaded
     if (_lazyLoaded.has('.cycles-section')) fetchCycles();
     if (_lazyLoaded.has('.cycle-overview-section')) fetchCycleOverview();
@@ -4546,6 +4609,7 @@ document.addEventListener('DOMContentLoaded', () => {
     Promise.all([
       loadHiddenInsights(),
       fetchCurrent(),
+      fetchAccountUsage(),
       fetchDeepInsights(),
       fetchHistory('6h'),
     ]);

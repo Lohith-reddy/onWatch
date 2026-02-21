@@ -39,6 +39,19 @@ func DetectCodexCredentials(logger *slog.Logger) *CodexCredentials {
 		return nil
 	}
 
+	return DetectCodexCredentialsFromPath(authPath, logger)
+}
+
+// DetectCodexCredentialsFromPath loads Codex credentials from an explicit auth.json path.
+func DetectCodexCredentialsFromPath(authPath string, logger *slog.Logger) *CodexCredentials {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	authPath = strings.TrimSpace(authPath)
+	if authPath == "" {
+		return nil
+	}
+
 	data, err := os.ReadFile(authPath)
 	if err != nil {
 		logger.Debug("Codex auth file not readable", "path", authPath, "error", err)
