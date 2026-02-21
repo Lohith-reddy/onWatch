@@ -72,6 +72,11 @@
                     </svg>
                     Multi-Account Weekly Tracker
                 </h3>
+                <div class="table-controls">
+                    <select class="page-size-select" id="accounts-name-filter" aria-label="Filter by account">
+                        <option value="">All Accounts</option>
+                    </select>
+                </div>
             </header>
             <div class="table-wrapper">
                 <table class="data-table" id="accounts-table">
@@ -560,13 +565,13 @@
 
     <footer class="app-footer">
         <div class="footer-content">
-            <span class="footer-brand"><a href="https://onwatch.onllm.dev" class="footer-link" target="_blank" rel="noopener">onWatch v{{.Version}}</a></span>
+            <span class="footer-brand"><a href="https://onwatch.onllm.dev" class="footer-link" target="_blank" rel="noopener">onWatch v1</a></span>
             <span id="update-badge" class="footer-update" hidden>
                 <button id="update-btn" class="footer-update-btn" title="Click to update">
                     Update to v<span id="update-version"></span>
                 </button>
             </span>
-            <span class="footer-heart">Built with &#10084;&#65039; by <a href="https://prakersh.in" class="footer-link" target="_blank" rel="noopener">Prakersh</a></span>
+            <span class="footer-heart">Made with &lt;3 by Lohith [Forked from Prakersh]</span>
             <div class="footer-links">
                 <a href="https://onllm.dev" class="footer-link" target="_blank" rel="noopener">onllm.dev</a>
                 <span class="footer-sep">&#183;</span>
