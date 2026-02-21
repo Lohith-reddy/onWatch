@@ -1516,8 +1516,17 @@ func (h *Handler) fetchWeeklyAccountUsage(acct config.MultiAccountConfig, now ti
 			return row
 		}
 		snap := usage.ToSnapshot(now)
-		for _, q := range snap.Quotas {
-			if q.Name != "seven_day" {
+		quotas := normalizeCodexQuotasByPlan(snap.PlanType, snap.Quotas)
+		quotaOrder := []string{"seven_day", "five_hour", "code_review"}
+		for _, name := range quotaOrder {
+			var q *api.CodexQuota
+			for i := range quotas {
+				if quotas[i].Name == name {
+					q = &quotas[i]
+					break
+				}
+			}
+			if q == nil {
 				continue
 			}
 			row["weeklyQuota"] = q.Name
@@ -1533,7 +1542,7 @@ func (h *Handler) fetchWeeklyAccountUsage(acct config.MultiAccountConfig, now ti
 			row["status"] = "ok"
 			return row
 		}
-		row["error"] = "weekly quota not found"
+		row["error"] = "no supported codex quota found"
 		return row
 
 	case "anthropic":

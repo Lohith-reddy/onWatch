@@ -1723,7 +1723,6 @@ async function fetchAccountUsage() {
     State.accountsLatestData = accounts;
     if (accounts.length === 0) {
       toggleAccountsSection(false);
-      updateActivateAccountButton();
       return;
     }
 
@@ -1733,7 +1732,7 @@ async function fetchAccountUsage() {
         .map(a => ({ key: `${a.provider}::${a.name}`, label: `${a.name} (${a.provider})` }))
         .sort((a, b) => a.label.localeCompare(b.label));
       const current = selector.value || '';
-      selector.innerHTML = '<option value="">All Accounts</option>' +
+      selector.innerHTML = '<option value="">No Dashboard Account Selected</option>' +
         options.map(o => `<option value="${escapeHTML(o.key)}">${escapeHTML(o.label)}</option>`).join('');
       if (current && options.some(o => o.key === current)) {
         selector.value = current;
@@ -1743,15 +1742,20 @@ async function fetchAccountUsage() {
       State.accountsSelectedKey = selector.value || '';
     }
 
-    const selectedKey = State.accountsSelectedKey || '';
-    const visibleAccounts = selectedKey
-      ? accounts.filter(a => `${a.provider}::${a.name}` === selectedKey)
-      : accounts;
-
     toggleAccountsSection(true);
-    body.innerHTML = visibleAccounts.map(acct => {
+    const selectedKey = State.accountsSelectedKey || '';
+    const sorted = [...accounts].sort((a, b) => {
+      const ak = `${a.name || ''}:${a.provider || ''}`.toLowerCase();
+      const bk = `${b.name || ''}:${b.provider || ''}`.toLowerCase();
+      return ak.localeCompare(bk);
+    });
+    body.innerHTML = sorted.map(acct => {
       const ok = acct.status === 'ok';
+      const key = `${acct.provider}::${acct.name}`;
+      const isSelected = selectedKey && key === selectedKey;
       const util = (typeof acct.weeklyUtilization === 'number') ? `${acct.weeklyUtilization.toFixed(1)}%` : '--';
+      const useDisabled = isSelected || !ok;
+      const useLabel = isSelected ? 'Selected' : 'Use This Account';
       return `
         <tr>
           <td>${escapeHTML(acct.name || '-')}</td>
@@ -1760,30 +1764,23 @@ async function fetchAccountUsage() {
           <td>${acct.weeklyLimitEndsAt ? formatDateTime(acct.weeklyLimitEndsAt) : '--'}</td>
           <td>${acct.renewalAt ? formatDateTime(acct.renewalAt) : '--'}</td>
           <td><span class="status-badge" data-status="${ok ? 'healthy' : 'danger'}">${ok ? 'Healthy' : `Error: ${escapeHTML(acct.error || 'request failed')}`}</span></td>
+          <td>
+            <button
+              class="settings-test-btn settings-test-btn-sm account-row-activate-btn"
+              data-provider="${escapeHTML(acct.provider || '')}"
+              data-name="${escapeHTML(acct.name || '')}"
+              ${useDisabled ? 'disabled' : ''}>
+              ${useLabel}
+            </button>
+          </td>
         </tr>
       `;
     }).join('');
-    if (visibleAccounts.length === 0) {
-      body.innerHTML = '<tr><td colspan="6" class="empty-state">No accounts match this filter.</td></tr>';
-    }
-    updateActivateAccountButton();
+    bindRowActivateButtons();
   } catch (err) {
     toggleAccountsSection(true);
-    body.innerHTML = '<tr><td colspan="6" class="empty-state">Unable to load multi-account usage.</td></tr>';
-    updateActivateAccountButton();
+    body.innerHTML = '<tr><td colspan="7" class="empty-state">Unable to load multi-account usage.</td></tr>';
   }
-}
-
-function updateActivateAccountButton() {
-  const btn = document.getElementById('account-activate-btn');
-  if (!btn) return;
-  const key = State.accountsSelectedKey || '';
-  if (!key) {
-    btn.disabled = true;
-    return;
-  }
-  const selected = State.accountsLatestData.find(a => `${a.provider}::${a.name}` === key);
-  btn.disabled = !selected || selected.status !== 'ok';
 }
 
 function setupAccountSelector() {
@@ -1800,49 +1797,39 @@ function setupAccountSelector() {
   });
 }
 
-function setupActivateAccountButton() {
-  const btn = document.getElementById('account-activate-btn');
-  if (!btn) return;
-  btn.addEventListener('click', async () => {
-    const key = State.accountsSelectedKey || '';
-    if (!key) {
-      alert('Select an account first.');
-      return;
-    }
+function bindRowActivateButtons() {
+  document.querySelectorAll('.account-row-activate-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const provider = btn.dataset.provider || '';
+      const name = btn.dataset.name || '';
+      if (!provider || !name) return;
+      if (btn.disabled) return;
+      if (!confirm(`Use account "${name}" for ${provider} and restart now?`)) return;
 
-    const selected = State.accountsLatestData.find(a => `${a.provider}::${a.name}` === key);
-    if (!selected || selected.status !== 'ok') {
-      alert('Selected account is not currently healthy.');
-      return;
-    }
-
-    const provider = selected.provider || '';
-    const name = selected.name || '';
-    if (!confirm(`Use account "${name}" for ${provider} and restart now?`)) return;
-
-    btn.disabled = true;
-    const prev = btn.textContent;
-    btn.textContent = 'Switching...';
-    try {
-      const resp = await authFetch('/api/accounts/activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, name })
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        alert(data.error || 'Failed to switch account');
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = 'Switching...';
+      try {
+        const resp = await authFetch('/api/accounts/activate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, name })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || 'Failed to switch account');
+          btn.disabled = false;
+          btn.textContent = prev;
+          return;
+        }
+        btn.textContent = 'Restarting...';
+        setTimeout(() => pollForRestart(), 1000);
+      } catch (e) {
+        alert('Network error while switching account');
         btn.disabled = false;
         btn.textContent = prev;
-        return;
       }
-      btn.textContent = 'Restarting...';
-      setTimeout(() => pollForRestart(), 1000);
-    } catch (e) {
-      alert('Network error while switching account');
-      btn.disabled = false;
-      btn.textContent = prev;
-    }
+    });
   });
 }
 
@@ -5015,7 +5002,6 @@ document.addEventListener('DOMContentLoaded', () => {
   setupTableControls();
   setupOverviewControls();
   setupAccountSelector();
-  setupActivateAccountButton();
   setupHeaderActions();
   setupCardModals();
 
